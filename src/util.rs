@@ -1,9 +1,12 @@
 use std::env;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
+
+pub const APP_DIR_NAME: &str = "llm-history";
 
 pub fn home_dir() -> PathBuf {
     env::var_os("HOME")
@@ -72,6 +75,69 @@ pub fn format_display_time(value: OffsetDateTime) -> String {
             .unwrap_or_else(|_| value.unix_timestamp().to_string()),
         Err(_) => value.unix_timestamp().to_string(),
     }
+}
+
+pub fn terminal_width() -> usize {
+    if let Ok(columns) = env::var("COLUMNS")
+        && let Ok(columns) = columns.parse::<usize>()
+        && columns > 0
+    {
+        return columns;
+    }
+
+    terminal_width_from_ioctl().unwrap_or(120)
+}
+
+#[cfg(unix)]
+fn terminal_width_from_ioctl() -> Option<usize> {
+    #[repr(C)]
+    struct Winsize {
+        ws_row: u16,
+        ws_col: u16,
+        ws_xpixel: u16,
+        ws_ypixel: u16,
+    }
+
+    unsafe extern "C" {
+        fn ioctl(fd: i32, request: usize, ...) -> i32;
+    }
+
+    #[cfg(target_os = "linux")]
+    const TIOCGWINSZ: usize = 0x5413;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const TIOCGWINSZ: usize = 0x40087468;
+
+    fn width_for_fd(fd: i32) -> Option<usize> {
+        let mut size = Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let result = unsafe { ioctl(fd, TIOCGWINSZ, &mut size) };
+        (result == 0 && size.ws_col > 0).then_some(size.ws_col as usize)
+    }
+
+    let fds = [
+        (std::io::stdout().is_terminal(), 1),
+        (std::io::stderr().is_terminal(), 2),
+        (std::io::stdin().is_terminal(), 0),
+    ];
+    fds.into_iter()
+        .filter_map(|(is_terminal, fd)| is_terminal.then_some(fd))
+        .find_map(width_for_fd)
+}
+
+#[cfg(not(unix))]
+fn terminal_width_from_ioctl() -> Option<usize> {
+    None
 }
 
 pub fn millis_to_time(value: i64) -> Option<OffsetDateTime> {

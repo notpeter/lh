@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 
 use crate::common::{LhResult, ThreadSummary};
 use crate::providers;
-use crate::util::{format_time, home_dir};
+use crate::util::{APP_DIR_NAME, format_time, home_dir};
 
 const SCHEMA: &str = "
 create table if not exists threads (
@@ -33,13 +33,13 @@ pub fn db_path() -> PathBuf {
 
 pub fn data_dir_for(home: &Path, xdg_data_home: Option<PathBuf>, os: &str) -> PathBuf {
     match os {
-        "macos" => home.join("Library/Application Support/lh"),
+        "macos" => home.join("Library/Application Support").join(APP_DIR_NAME),
         "linux" => xdg_data_home
-            .map(|path| path.join("lh"))
-            .unwrap_or_else(|| home.join(".local/state/lh")),
+            .map(|path| path.join(APP_DIR_NAME))
+            .unwrap_or_else(|| home.join(".local/state").join(APP_DIR_NAME)),
         _ => xdg_data_home
-            .map(|path| path.join("lh"))
-            .unwrap_or_else(|| home.join(".local/share/lh")),
+            .map(|path| path.join(APP_DIR_NAME))
+            .unwrap_or_else(|| home.join(".local/share").join(APP_DIR_NAME)),
     }
 }
 
@@ -109,7 +109,7 @@ mod tests {
     fn chooses_macos_data_dir() {
         assert_eq!(
             data_dir_for(Path::new("/home/me"), None, "macos"),
-            PathBuf::from("/home/me/Library/Application Support/lh")
+            PathBuf::from("/home/me/Library/Application Support/llm-history")
         );
     }
 
@@ -121,7 +121,7 @@ mod tests {
                 Some(PathBuf::from("/tmp/xdg")),
                 "linux"
             ),
-            PathBuf::from("/tmp/xdg/lh")
+            PathBuf::from("/tmp/xdg/llm-history")
         );
     }
 
@@ -129,7 +129,7 @@ mod tests {
     fn chooses_linux_fallback_data_dir() {
         assert_eq!(
             data_dir_for(Path::new("/home/me"), None, "linux"),
-            PathBuf::from("/home/me/.local/state/lh")
+            PathBuf::from("/home/me/.local/state/llm-history")
         );
     }
 }

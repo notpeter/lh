@@ -1,6 +1,7 @@
 mod claude;
 mod codex;
 mod common;
+mod config;
 mod db;
 mod fuzzy;
 mod gemini;
@@ -11,13 +12,14 @@ mod util;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use clap::{Parser, Subcommand};
 
 use common::{AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ThreadSummary};
 use fuzzy::MatchResult;
-use util::{canonicalize_existing, format_display_time, shorten_path};
+use util::{canonicalize_existing, format_display_time, format_time, shorten_path, terminal_width};
 
 #[derive(Parser)]
 #[command(name = "lh", about = "Unified LLM agent thread history")]
@@ -44,6 +46,25 @@ enum Commands {
     Resume {
         agent_or_name: Option<String>,
         name: Option<String>,
+    },
+    Info {
+        #[arg(short = 'g', long = "global")]
+        global: bool,
+        agent_or_name: Option<String>,
+        name: Option<String>,
+    },
+    #[command(alias = "ln")]
+    Alias {
+        #[arg(short = 's')]
+        symbolic: bool,
+        source_or_target: Option<PathBuf>,
+        target: Option<PathBuf>,
+    },
+    Unalias {
+        dir: Option<PathBuf>,
+    },
+    Cd {
+        dir: Option<String>,
     },
     #[command(alias = "rm")]
     Remove {
@@ -98,6 +119,18 @@ fn run() -> LhResult<()> {
             agent_or_name,
             name,
         } => resume(&cwd, agent_or_name, name),
+        Commands::Info {
+            global,
+            agent_or_name,
+            name,
+        } => info(&cwd, global, agent_or_name, name),
+        Commands::Alias {
+            symbolic,
+            source_or_target,
+            target,
+        } => alias(&cwd, symbolic, source_or_target, target),
+        Commands::Unalias { dir } => unalias(&cwd, dir),
+        Commands::Cd { dir } => cd(&cwd, dir),
         Commands::Remove {
             agent,
             name,
@@ -131,7 +164,8 @@ fn list(cwd: &Path, global: bool, all: bool, limit: Option<usize>) -> LhResult<(
     let mut threads = if global {
         providers::list_global()?
     } else {
-        providers::list_all(cwd)?
+        let dirs = config::alias_group(cwd)?;
+        providers::list_all_for_dirs(&dirs)?
     };
     let effective_limit = if all {
         None
@@ -150,7 +184,7 @@ fn list(cwd: &Path, global: bool, all: bool, limit: Option<usize>) -> LhResult<(
         }
         return Ok(());
     }
-    print_threads(&threads, global);
+    print_threads(&threads);
     Ok(())
 }
 
@@ -207,9 +241,86 @@ fn new_thread(cwd: &Path, agent: Option<String>, name: Option<String>) -> LhResu
 
 fn resume(cwd: &Path, agent_or_name: Option<String>, name: Option<String>) -> LhResult<()> {
     let (agent, query) = parse_selector(agent_or_name, name)?;
-    let (provider, thread) = select_provider_thread(cwd, agent, query.as_deref())?;
+    let (provider, thread) = select_provider_thread(cwd, false, agent, query.as_deref())?;
+    if let Some(thread) = &thread {
+        ensure_resumable_from_cwd(cwd, thread)?;
+    }
     let command = provider.resume_command(thread.as_ref())?;
     command.exec()
+}
+
+fn info(
+    cwd: &Path,
+    global: bool,
+    agent_or_name: Option<String>,
+    name: Option<String>,
+) -> LhResult<()> {
+    let (agent, query) = parse_selector(agent_or_name, name)?;
+    let (provider, thread) = select_provider_thread(cwd, global, agent, query.as_deref())?;
+    let thread = thread.ok_or("no thread selected")?;
+    print_thread_info(&*provider, &thread);
+    Ok(())
+}
+
+fn alias(
+    cwd: &Path,
+    _symbolic: bool,
+    source_or_target: Option<PathBuf>,
+    target: Option<PathBuf>,
+) -> LhResult<()> {
+    let Some(source_or_target) = source_or_target else {
+        return print_aliases();
+    };
+
+    let (source, target) = match target {
+        Some(target) if source_or_target == Path::new(".") => (cwd.to_path_buf(), target),
+        Some(target) => (source_or_target, target),
+        None => (cwd.to_path_buf(), source_or_target),
+    };
+
+    let (source, target, path) = config::add_alias(cwd, &source, &target)?;
+    println!("aliased {source} -> {target}");
+    println!("config {}", path.display());
+    Ok(())
+}
+
+fn print_aliases() -> LhResult<()> {
+    let config = config::load()?;
+    if config.alias.is_empty() {
+        println!("No aliases configured");
+        println!("config {}", config::config_path().display());
+        return Ok(());
+    }
+
+    for (source, target) in config.alias {
+        println!("{source} -> {target}");
+    }
+    Ok(())
+}
+
+fn unalias(cwd: &Path, dir: Option<PathBuf>) -> LhResult<()> {
+    let dir = dir.unwrap_or_else(|| PathBuf::from("."));
+    let dir = if dir == Path::new(".") {
+        cwd.to_path_buf()
+    } else {
+        dir
+    };
+    let (removed, path) = config::remove_alias(cwd, &dir)?;
+
+    if removed.is_empty() {
+        println!("No aliases removed");
+    } else {
+        for (source, target) in removed {
+            println!("removed alias {source} -> {target}");
+        }
+    }
+    println!("config {}", path.display());
+    Ok(())
+}
+
+fn cd(cwd: &Path, query: Option<String>) -> LhResult<()> {
+    let target = select_alias_dir(cwd, query.as_deref())?;
+    exec_shell_in_dir(&target)
 }
 
 fn remove(
@@ -220,7 +331,7 @@ fn remove(
     dry_run: bool,
 ) -> LhResult<()> {
     let (agent, query) = parse_selector(agent_or_name, name)?;
-    let (_provider, thread) = select_provider_thread(cwd, agent, query.as_deref())?;
+    let (_provider, thread) = select_provider_thread(cwd, false, agent, query.as_deref())?;
     let thread = thread.ok_or("no thread selected")?;
     let target = thread
         .removable
@@ -333,12 +444,18 @@ fn default_new_agent() -> AgentKind {
 
 fn select_provider_thread(
     cwd: &Path,
+    global: bool,
     agent: Option<AgentKind>,
     query: Option<&str>,
 ) -> LhResult<(Box<dyn AgentProvider>, Option<ThreadSummary>)> {
     if let Some(agent) = agent {
         let provider = providers::by_kind(agent);
-        let threads = provider.list_threads(cwd)?;
+        let threads = if global {
+            provider.list_threads_global()?
+        } else {
+            let dirs = config::alias_group(cwd)?;
+            providers::list_provider_for_dirs(&*provider, &dirs)?
+        };
         return match fuzzy::select_thread(&threads, query) {
             MatchResult::One(thread) => Ok((provider, Some(thread.clone()))),
             MatchResult::None if query.is_none() => Ok((provider, None)),
@@ -347,7 +464,12 @@ fn select_provider_thread(
         };
     }
 
-    let threads = providers::list_all(cwd)?;
+    let threads = if global {
+        providers::list_global()?
+    } else {
+        let dirs = config::alias_group(cwd)?;
+        providers::list_all_for_dirs(&dirs)?
+    };
     match fuzzy::select_thread(&threads, query) {
         MatchResult::One(thread) => Ok((providers::by_kind(thread.agent), Some(thread.clone()))),
         MatchResult::None => Err("no matching thread found".into()),
@@ -368,52 +490,201 @@ fn ambiguous_error(candidates: Vec<&ThreadSummary>) -> String {
     out
 }
 
-fn print_threads(threads: &[ThreadSummary], show_cwd: bool) {
+fn print_threads(threads: &[ThreadSummary]) {
     const UPDATED_WIDTH: usize = 19;
+    const AGENT_WIDTH: usize = 10;
+    const ID_WIDTH: usize = 36;
+    const DIR_WIDTH: usize = 30;
 
-    if show_cwd {
-        println!(
-            "{:<UPDATED_WIDTH$} {:<10} {:<36} {:<34} {:<36} SOURCE",
-            "UPDATED", "AGENT", "ID", "NAME", "CWD"
-        );
-    } else {
-        println!(
-            "{:<UPDATED_WIDTH$} {:<10} {:<36} {:<34} SOURCE",
-            "UPDATED", "AGENT", "ID", "NAME"
-        );
-    }
+    let name_width = list_name_width(terminal_width());
+    println!(
+        "{:<UPDATED_WIDTH$} {:<AGENT_WIDTH$} {:<ID_WIDTH$} {:<DIR_WIDTH$} NAME",
+        "UPDATED", "AGENT", "ID", "DIR"
+    );
     for thread in threads {
         let updated = thread
             .updated_at
             .or(thread.created_at)
             .map(format_display_time)
             .unwrap_or_else(|| "-".to_string());
-        let source = thread
+        println!(
+            "{:<UPDATED_WIDTH$} {:<AGENT_WIDTH$} {:<ID_WIDTH$} {:<DIR_WIDTH$} {}",
+            updated,
+            thread.agent.as_str(),
+            thread.id,
+            common::truncate(&shorten_path(&thread.cwd), DIR_WIDTH),
+            common::truncate(&thread.display_name(), name_width),
+        );
+    }
+}
+
+fn list_name_width(terminal_width: usize) -> usize {
+    const UPDATED_WIDTH: usize = 19;
+    const AGENT_WIDTH: usize = 10;
+    const ID_WIDTH: usize = 36;
+    const DIR_WIDTH: usize = 30;
+
+    let fixed_width = UPDATED_WIDTH + AGENT_WIDTH + ID_WIDTH + DIR_WIDTH;
+    let separator_count = 4;
+    terminal_width
+        .saturating_sub(1)
+        .saturating_sub(fixed_width)
+        .saturating_sub(separator_count)
+        .max(1)
+}
+
+fn print_thread_info(provider: &dyn AgentProvider, thread: &ThreadSummary) {
+    let field = |name: &str, value: String| {
+        println!("{name:<14} {value}");
+    };
+
+    field("Agent", thread.agent.display_name().to_string());
+    field("ID", thread.id.clone());
+    field("Name", thread.display_name());
+    field("CWD", thread.cwd.display().to_string());
+    field(
+        "Created",
+        thread
+            .created_at
+            .map(format_time)
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    field(
+        "Updated",
+        thread
+            .updated_at
+            .map(format_time)
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    field(
+        "Source",
+        thread
             .source_path
             .as_ref()
-            .map(|path| shorten_path(path))
-            .unwrap_or_else(|| "-".to_string());
-        if show_cwd {
-            println!(
-                "{:<UPDATED_WIDTH$} {:<10} {:<36} {:<34} {:<36} {}",
-                updated,
-                thread.agent.as_str(),
-                thread.id,
-                common::truncate(&thread.display_name(), 34),
-                common::truncate(&shorten_path(&thread.cwd), 36),
-                source
-            );
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    if let Some(preview) = &thread.preview {
+        field("Preview", common::truncate(preview, 500));
+    }
+    if let Some(target) = &thread.removable {
+        field("Removable", removal_description(thread, target));
+    }
+    if let Ok(command) = provider.resume_command(Some(thread)) {
+        field("Resume", command.display());
+    }
+}
+
+fn select_alias_dir(cwd: &Path, query: Option<&str>) -> LhResult<PathBuf> {
+    let current = canonicalize_existing(cwd);
+    let mut candidates = config::alias_group(cwd)?;
+    if candidates.len() <= 1 {
+        candidates = config::all_alias_dirs()?;
+    }
+    candidates.retain(|dir| *dir != current);
+
+    let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+        return match candidates.as_slice() {
+            [target] => Ok(target.clone()),
+            [] => Err("no aliased directories found".into()),
+            _ => Err(alias_cd_ambiguous_error(candidates).into()),
+        };
+    };
+
+    let query = query.to_ascii_lowercase();
+    let matches = candidates
+        .into_iter()
+        .filter(|dir| {
+            let display = config::compact_home_path(dir).to_ascii_lowercase();
+            let name = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            name == query || name.contains(&query) || display.contains(&query)
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [target] => Ok(target.clone()),
+        [] => Err("no matching aliased directory found".into()),
+        _ => Err(alias_cd_ambiguous_error(matches).into()),
+    }
+}
+
+fn alias_cd_ambiguous_error(candidates: Vec<PathBuf>) -> String {
+    let mut out = String::from("ambiguous aliased directory; use a more specific query:");
+    for candidate in candidates.into_iter().take(8) {
+        out.push_str(&format!("\n  {}", config::compact_home_path(&candidate)));
+    }
+    out
+}
+
+fn exec_shell_in_dir(dir: &Path) -> LhResult<()> {
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = Command::new(&shell).current_dir(dir).exec();
+        Err(Box::new(err))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = Command::new(&shell).current_dir(dir).status()?;
+        if status.success() {
+            Ok(())
         } else {
-            println!(
-                "{:<UPDATED_WIDTH$} {:<10} {:<36} {:<34} {}",
-                updated,
-                thread.agent.as_str(),
-                thread.id,
-                common::truncate(&thread.display_name(), 34),
-                source
-            );
+            Err(format!("shell exited with {status}").into())
         }
     }
+}
+
+fn ensure_resumable_from_cwd(cwd: &Path, thread: &ThreadSummary) -> LhResult<()> {
+    let current = canonicalize_existing(cwd);
+    let thread_cwd = canonicalize_existing(&thread.cwd);
+    if current == thread_cwd {
+        return Ok(());
+    }
+
+    let alias_group = config::alias_group(cwd)?;
+    if alias_group.contains(&thread_cwd) {
+        return Err(alternate_directory_resume_message(thread, &thread_cwd).into());
+    }
+
+    Ok(())
+}
+
+fn alternate_directory_resume_message(thread: &ThreadSummary, thread_cwd: &Path) -> String {
+    format!(
+        "That session was created under an alternate directory. To resume run:\n    cd {} && lh resume {}",
+        shell_path(thread_cwd),
+        shell_arg(&thread.id),
+    )
+}
+
+fn shell_path(path: &Path) -> String {
+    let compact = config::compact_home_path(path);
+    if is_shell_safe(&compact) {
+        compact
+    } else {
+        shell_arg(&path.display().to_string())
+    }
+}
+
+fn shell_arg(value: &str) -> String {
+    if is_shell_safe(value) {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn is_shell_safe(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | '~'))
 }
 
 fn removal_description(thread: &ThreadSummary, target: &RemovalTarget) -> String {
@@ -500,6 +771,37 @@ mod tests {
         assert_eq!(
             normalize_args(strings(&["lh", "resume", "-10"])),
             strings(&["lh", "resume", "-10"])
+        );
+    }
+
+    #[test]
+    fn local_list_name_width_uses_remaining_terminal_width() {
+        assert_eq!(list_name_width(120), 20);
+    }
+
+    #[test]
+    fn small_terminal_preserves_some_name_width() {
+        assert_eq!(list_name_width(80), 1);
+    }
+
+    #[test]
+    fn alternate_directory_resume_message_points_at_owner_dir() {
+        let thread = ThreadSummary {
+            agent: AgentKind::Codex,
+            id: "abc123".to_string(),
+            name: None,
+            cwd: PathBuf::from("/tmp/other clone"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+
+        assert_eq!(
+            alternate_directory_resume_message(&thread, Path::new("/tmp/other clone")),
+            "That session was created under an alternate directory. To resume run:\n    cd '/tmp/other clone' && lh resume abc123"
         );
     }
 }
