@@ -513,9 +513,17 @@ fn print_threads(threads: &[ThreadSummary]) {
             thread.agent.as_str(),
             thread.id,
             common::truncate(&shorten_path(&thread.cwd), DIR_WIDTH),
-            common::truncate(&thread.display_name(), name_width),
+            common::truncate(&thread_list_name(thread), name_width),
         );
     }
+}
+
+fn thread_list_name(thread: &ThreadSummary) -> String {
+    thread
+        .name
+        .clone()
+        .or_else(|| thread.preview.clone())
+        .unwrap_or_else(|| thread.id.clone())
 }
 
 fn list_name_width(terminal_width: usize) -> usize {
@@ -782,6 +790,25 @@ mod tests {
     #[test]
     fn small_terminal_preserves_some_name_width() {
         assert_eq!(list_name_width(80), 1);
+    }
+
+    #[test]
+    fn list_name_uses_full_preview_before_width_truncation() {
+        let preview = "x".repeat(100);
+        let thread = ThreadSummary {
+            agent: AgentKind::Codex,
+            id: "abc123".to_string(),
+            name: None,
+            cwd: PathBuf::from("/tmp"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: Some(preview.clone()),
+            removable: None,
+            resume_hint: None,
+        };
+
+        assert_eq!(thread_list_name(&thread), preview);
     }
 
     #[test]
