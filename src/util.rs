@@ -18,6 +18,10 @@ pub fn canonicalize_existing(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+pub fn path_is_at_or_under(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
     env::split_paths(&path).find_map(|dir| {

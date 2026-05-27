@@ -8,7 +8,9 @@ use crate::common::{
     AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ThreadSummary,
     default_executable,
 };
-use crate::util::{canonicalize_existing, first_json_text, home_dir, parse_time};
+use crate::util::{
+    canonicalize_existing, first_json_text, home_dir, parse_time, path_is_at_or_under,
+};
 
 pub struct ClaudeProvider {
     home: PathBuf,
@@ -46,11 +48,20 @@ impl AgentProvider for ClaudeProvider {
 
     fn list_threads(&self, cwd: &Path) -> LhResult<Vec<ThreadSummary>> {
         let canonical_cwd = canonicalize_existing(cwd);
-        let project_dir = self.project_dir_for(&canonical_cwd);
-        Ok(self
-            .list_project_dir(&project_dir, Some(&canonical_cwd))
-            .into_iter()
-            .collect())
+        let projects_dir = self.home.join(".claude/projects");
+        let Ok(entries) = fs::read_dir(projects_dir) else {
+            return Ok(Vec::new());
+        };
+        let mut threads = Vec::new();
+        for entry in entries.flatten() {
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            threads.extend(self.list_project_dir(&project_dir, Some(&canonical_cwd)));
+        }
+        threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
+        Ok(threads)
     }
 
     fn list_threads_global(&self) -> LhResult<Vec<ThreadSummary>> {
@@ -176,7 +187,7 @@ fn parse_claude_jsonl(
         .unwrap_or_else(|| fallback_cwd.to_path_buf());
 
     if let Some(cwd_filter) = cwd_filter
-        && cwd != cwd_filter
+        && !path_is_at_or_under(&cwd, cwd_filter)
     {
         return None;
     }
@@ -251,5 +262,29 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "abc");
         assert_eq!(threads[0].preview.as_deref(), Some("hello claude"));
+    }
+
+    #[test]
+    fn list_threads_includes_subdirectories() {
+        let root = temp_dir("claude-subdir");
+        let cwd = root.join("work");
+        let child = cwd.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let provider = ClaudeProvider::with_home(root);
+        let project_dir = provider.project_dir_for(&child);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello child\"}}}}\n",
+                child.display()
+            ),
+        )
+        .unwrap();
+
+        let threads = provider.list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "abc");
+        assert_eq!(threads[0].cwd, canonicalize_existing(&child));
     }
 }

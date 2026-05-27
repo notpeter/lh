@@ -8,7 +8,9 @@ use crate::common::{
     AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ResumeHint, ThreadSummary,
     default_executable,
 };
-use crate::util::{canonicalize_existing, home_dir, parse_time, read_to_string};
+use crate::util::{
+    canonicalize_existing, home_dir, parse_time, path_is_at_or_under, read_to_string,
+};
 
 pub struct GeminiProvider {
     home: PathBuf,
@@ -44,10 +46,26 @@ impl AgentProvider for GeminiProvider {
 
     fn list_threads(&self, cwd: &Path) -> LhResult<Vec<ThreadSummary>> {
         let canonical_cwd = canonicalize_existing(cwd);
-        let Some(project_dir) = find_project_dir(&self.tmp_dir(), &canonical_cwd) else {
+        let Ok(entries) = fs::read_dir(self.tmp_dir()) else {
             return Ok(Vec::new());
         };
-        Ok(self.list_project_dir(&project_dir, &canonical_cwd))
+
+        let mut threads = Vec::new();
+        for entry in entries.flatten() {
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let Some(project_root) = read_to_string(&project_dir.join(".project_root")) else {
+                continue;
+            };
+            let project_root = canonicalize_existing(Path::new(project_root.trim()));
+            if path_is_at_or_under(&project_root, &canonical_cwd) {
+                threads.extend(self.list_project_dir(&project_dir, &project_root));
+            }
+        }
+        threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
+        Ok(threads)
     }
 
     fn list_threads_global(&self) -> LhResult<Vec<ThreadSummary>> {
@@ -279,5 +297,29 @@ mod tests {
         let threads = GeminiProvider::with_home(root).list_threads(&cwd).unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].preview.as_deref(), Some("hello gemini"));
+    }
+
+    #[test]
+    fn list_threads_includes_subdirectories() {
+        let root = temp_dir("gemini-subdir");
+        let cwd = root.join("work");
+        let child = cwd.join("child");
+        let project = root.join(".gemini/tmp/child");
+        fs::create_dir_all(project.join("chats")).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            project.join(".project_root"),
+            child.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        fs::write(
+            project.join("chats/session.jsonl"),
+            "{\"sessionId\":\"g\",\"startTime\":\"2026-05-01T00:00:00Z\",\"lastUpdated\":\"2026-05-01T00:00:00Z\"}\n",
+        )
+        .unwrap();
+
+        let threads = GeminiProvider::with_home(root).list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].cwd, canonicalize_existing(&child));
     }
 }

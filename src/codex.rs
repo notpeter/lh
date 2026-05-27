@@ -10,6 +10,7 @@ use crate::common::{
 };
 use crate::util::{
     canonicalize_existing, collect_files_with_name_prefix, first_json_text, home_dir, parse_time,
+    path_is_at_or_under,
 };
 
 pub struct CodexProvider {
@@ -170,7 +171,7 @@ fn parse_codex_rollout(
 
     let cwd = canonicalize_existing(&file_cwd?);
     if let Some(cwd_filter) = cwd_filter
-        && cwd != cwd_filter
+        && !path_is_at_or_under(&cwd, cwd_filter)
     {
         return None;
     }
@@ -255,5 +256,27 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name.as_deref(), Some("named codex"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello codex"));
+    }
+
+    #[test]
+    fn list_threads_includes_subdirectories() {
+        let root = temp_dir("codex-subdir");
+        let cwd = root.join("work");
+        let child = cwd.join("child");
+        fs::create_dir_all(root.join(".codex/sessions/2026/05/27")).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            root.join(".codex/sessions/2026/05/27/rollout-child.jsonl"),
+            format!(
+                "{{\"timestamp\":\"2026-05-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"child\",\"cwd\":\"{}\"}}}}\n",
+                child.display()
+            ),
+        )
+        .unwrap();
+
+        let threads = CodexProvider::with_home(root).list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "child");
+        assert_eq!(threads[0].cwd, canonicalize_existing(&child));
     }
 }

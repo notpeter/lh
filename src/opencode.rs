@@ -8,7 +8,9 @@ use crate::common::{
     AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ThreadSummary,
     default_executable,
 };
-use crate::util::{canonicalize_existing, find_executable, home_dir, millis_to_time};
+use crate::util::{
+    canonicalize_existing, find_executable, home_dir, millis_to_time, path_is_at_or_under,
+};
 
 pub struct OpenCodeProvider {
     home: PathBuf,
@@ -104,8 +106,8 @@ impl OpenCodeProvider {
                 .map(|path| canonicalize_existing(path))
                 .unwrap_or_else(|| canonical_directory.clone());
             if let Some(cwd_filter) = cwd_filter
-                && canonical_directory != cwd_filter
-                && thread_cwd != cwd_filter
+                && !path_is_at_or_under(&canonical_directory, cwd_filter)
+                && !path_is_at_or_under(&thread_cwd, cwd_filter)
             {
                 continue;
             }
@@ -239,5 +241,39 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name.as_deref(), Some("Title"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello opencode"));
+    }
+
+    #[test]
+    fn list_threads_includes_subdirectories() {
+        let root = temp_dir("opencode-subdir");
+        let cwd = root.join("work");
+        let child = cwd.join("child");
+        let db_dir = root.join(".local/share/opencode");
+        fs::create_dir_all(&db_dir).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        let conn = Connection::open(db_dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "create table project (id text primary key, worktree text not null);
+             create table session (id text primary key, project_id text not null, slug text not null, title text not null, directory text not null, time_created integer not null, time_updated integer not null);
+             create table message (id text primary key, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);
+             create table part (id text primary key, message_id text not null, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into project values ('p', ?1)",
+            params![child.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into session values ('s', 'p', 'slug', 'Title', ?1, 1000, 2000)",
+            params![child.to_string_lossy()],
+        )
+        .unwrap();
+
+        let threads = OpenCodeProvider::with_home(root)
+            .list_threads(&cwd)
+            .unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].cwd, canonicalize_existing(&child));
     }
 }
