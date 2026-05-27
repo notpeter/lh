@@ -1,0 +1,283 @@
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+use crate::common::{
+    AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ResumeHint, ThreadSummary,
+    default_executable,
+};
+use crate::util::{canonicalize_existing, home_dir, parse_time, read_to_string};
+
+pub struct GeminiProvider {
+    home: PathBuf,
+}
+
+impl GeminiProvider {
+    pub fn new() -> Self {
+        Self { home: home_dir() }
+    }
+
+    #[cfg(test)]
+    pub fn with_home(home: PathBuf) -> Self {
+        Self { home }
+    }
+
+    fn tmp_dir(&self) -> PathBuf {
+        self.home.join(".gemini/tmp")
+    }
+}
+
+impl AgentProvider for GeminiProvider {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Gemini
+    }
+
+    fn history_path(&self, cwd: &Path) -> PathBuf {
+        find_project_dir(&self.tmp_dir(), cwd).unwrap_or_else(|| self.tmp_dir())
+    }
+
+    fn executable(&self) -> Option<PathBuf> {
+        crate::util::find_executable("gemini")
+    }
+
+    fn list_threads(&self, cwd: &Path) -> LhResult<Vec<ThreadSummary>> {
+        let canonical_cwd = canonicalize_existing(cwd);
+        let Some(project_dir) = find_project_dir(&self.tmp_dir(), &canonical_cwd) else {
+            return Ok(Vec::new());
+        };
+        Ok(self.list_project_dir(&project_dir, &canonical_cwd))
+    }
+
+    fn list_threads_global(&self) -> LhResult<Vec<ThreadSummary>> {
+        let Ok(entries) = fs::read_dir(self.tmp_dir()) else {
+            return Ok(Vec::new());
+        };
+
+        let mut threads = Vec::new();
+        for entry in entries.flatten() {
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let Some(project_root) = read_to_string(&project_dir.join(".project_root")) else {
+                continue;
+            };
+            let cwd = canonicalize_existing(Path::new(project_root.trim()));
+            threads.extend(self.list_project_dir(&project_dir, &cwd));
+        }
+        threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
+        Ok(threads)
+    }
+
+    fn new_command(&self, _name: Option<&str>, _cwd: &Path) -> LhResult<LaunchCommand> {
+        Ok(LaunchCommand::new(
+            default_executable("gemini"),
+            [] as [OsString; 0],
+        ))
+    }
+
+    fn resume_command(&self, thread: Option<&ThreadSummary>) -> LhResult<LaunchCommand> {
+        if let Some(ThreadSummary {
+            resume_hint: Some(ResumeHint::GeminiSessionFile(path)),
+            ..
+        }) = thread
+        {
+            return Ok(LaunchCommand::new(
+                default_executable("gemini"),
+                [
+                    OsString::from("--session-file"),
+                    path.as_os_str().to_os_string(),
+                ],
+            ));
+        }
+
+        Ok(LaunchCommand::new(
+            default_executable("gemini"),
+            [OsString::from("--resume"), OsString::from("latest")],
+        ))
+    }
+}
+
+impl GeminiProvider {
+    fn list_project_dir(&self, project_dir: &Path, cwd: &Path) -> Vec<ThreadSummary> {
+        let logs_path = project_dir.join("logs.json");
+        let logs = read_gemini_logs(&logs_path);
+        let chats_dir = project_dir.join("chats");
+        let Ok(entries) = fs::read_dir(&chats_dir) else {
+            return Vec::new();
+        };
+
+        let mut threads = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some(thread) = parse_gemini_chat(&path, logs.as_ref(), &logs_path, cwd) {
+                threads.push(thread);
+            }
+        }
+        threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
+        threads
+    }
+}
+
+fn find_project_dir(tmp_dir: &Path, cwd: &Path) -> Option<PathBuf> {
+    let canonical_cwd = canonicalize_existing(cwd);
+    let entries = fs::read_dir(tmp_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let project_root = path.join(".project_root");
+        let Some(root) = read_to_string(&project_root) else {
+            continue;
+        };
+        if canonicalize_existing(Path::new(root.trim())) == canonical_cwd {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn read_gemini_logs(path: &Path) -> Option<Vec<Value>> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Vec<Value>>(&text).ok()
+}
+
+fn parse_gemini_chat(
+    path: &Path,
+    logs: Option<&Vec<Value>>,
+    logs_path: &Path,
+    cwd: &Path,
+) -> Option<ThreadSummary> {
+    let text = fs::read_to_string(path).ok()?;
+    let first = text.lines().find(|line| !line.trim().is_empty())?;
+    let value = serde_json::from_str::<Value>(first).ok()?;
+    let id = value
+        .get("sessionId")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .map(ToString::to_string)
+        })?;
+    let created_at = value
+        .get("startTime")
+        .and_then(|value| value.as_str())
+        .and_then(parse_time);
+    let mut updated_at = value
+        .get("lastUpdated")
+        .and_then(|value| value.as_str())
+        .and_then(parse_time)
+        .or(created_at);
+    let mut preview = None;
+
+    if let Some(logs) = logs {
+        for log in logs {
+            if log.get("sessionId").and_then(|value| value.as_str()) != Some(id.as_str()) {
+                continue;
+            }
+            if preview.is_none() && log.get("type").and_then(|value| value.as_str()) == Some("user")
+            {
+                preview = log
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .map(ToString::to_string);
+            }
+            if let Some(timestamp) = log
+                .get("timestamp")
+                .and_then(|value| value.as_str())
+                .and_then(parse_time)
+            {
+                updated_at = Some(
+                    updated_at.map_or(timestamp, |current: time::OffsetDateTime| {
+                        current.max(timestamp)
+                    }),
+                );
+            }
+        }
+    }
+
+    Some(ThreadSummary {
+        agent: AgentKind::Gemini,
+        id: id.clone(),
+        name: preview
+            .clone()
+            .map(|value| crate::common::truncate(&value, 64)),
+        cwd: cwd.to_path_buf(),
+        created_at,
+        updated_at,
+        source_path: Some(path.to_path_buf()),
+        preview,
+        removable: Some(RemovalTarget::GeminiFiles {
+            chat_path: path.to_path_buf(),
+            logs_path: logs_path.exists().then(|| logs_path.to_path_buf()),
+            session_id: id,
+        }),
+        resume_hint: Some(ResumeHint::GeminiSessionFile(path.to_path_buf())),
+    })
+}
+
+pub fn delete_gemini_files(
+    chat_path: &Path,
+    logs_path: Option<&Path>,
+    session_id: &str,
+) -> LhResult<()> {
+    if chat_path.exists() {
+        fs::remove_file(chat_path)?;
+    }
+
+    if let Some(logs_path) = logs_path.filter(|path| path.exists()) {
+        let logs = read_gemini_logs(logs_path).unwrap_or_default();
+        let filtered = logs
+            .into_iter()
+            .filter(|entry| {
+                entry.get("sessionId").and_then(|value| value.as_str()) != Some(session_id)
+            })
+            .collect::<Vec<_>>();
+        fs::write(logs_path, serde_json::to_string_pretty(&filtered)?)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::util::temp_dir;
+
+    #[test]
+    fn parses_gemini_fixture() {
+        let root = temp_dir("gemini");
+        let cwd = root.join("work");
+        let project = root.join(".gemini/tmp/lh");
+        fs::create_dir_all(project.join("chats")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            project.join(".project_root"),
+            cwd.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        fs::write(
+            project.join("chats/session.jsonl"),
+            "{\"sessionId\":\"g\",\"startTime\":\"2026-05-01T00:00:00Z\",\"lastUpdated\":\"2026-05-01T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("logs.json"),
+            "[{\"sessionId\":\"g\",\"type\":\"user\",\"message\":\"hello gemini\",\"timestamp\":\"2026-05-01T00:01:00Z\"}]",
+        )
+        .unwrap();
+
+        let threads = GeminiProvider::with_home(root).list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].preview.as_deref(), Some("hello gemini"));
+    }
+}
