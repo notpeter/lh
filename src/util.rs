@@ -82,6 +82,10 @@ pub fn format_display_time(value: OffsetDateTime) -> String {
 }
 
 pub fn terminal_width() -> usize {
+    if let Some(columns) = terminal_width_from_ioctl() {
+        return columns;
+    }
+
     if let Ok(columns) = env::var("COLUMNS")
         && let Ok(columns) = columns.parse::<usize>()
         && columns > 0
@@ -89,7 +93,7 @@ pub fn terminal_width() -> usize {
         return columns;
     }
 
-    terminal_width_from_ioctl().unwrap_or(120)
+    120
 }
 
 #[cfg(unix)]

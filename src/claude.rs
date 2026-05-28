@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,10 @@ impl ClaudeProvider {
             .join(".claude/projects")
             .join(encode_project_path(&canonicalize_existing(cwd)))
     }
+
+    fn sessions_dir(&self) -> PathBuf {
+        self.home.join(".claude/sessions")
+    }
 }
 
 impl AgentProvider for ClaudeProvider {
@@ -52,13 +57,14 @@ impl AgentProvider for ClaudeProvider {
         let Ok(entries) = fs::read_dir(projects_dir) else {
             return Ok(Vec::new());
         };
+        let names = read_session_names(&self.sessions_dir());
         let mut threads = Vec::new();
         for entry in entries.flatten() {
             let project_dir = entry.path();
             if !project_dir.is_dir() {
                 continue;
             }
-            threads.extend(self.list_project_dir(&project_dir, Some(&canonical_cwd)));
+            threads.extend(self.list_project_dir(&project_dir, Some(&canonical_cwd), &names));
         }
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
         Ok(threads)
@@ -69,13 +75,14 @@ impl AgentProvider for ClaudeProvider {
         let Ok(entries) = fs::read_dir(projects_dir) else {
             return Ok(Vec::new());
         };
+        let names = read_session_names(&self.sessions_dir());
         let mut threads = Vec::new();
         for entry in entries.flatten() {
             let project_dir = entry.path();
             if !project_dir.is_dir() {
                 continue;
             }
-            threads.extend(self.list_project_dir(&project_dir, None));
+            threads.extend(self.list_project_dir(&project_dir, None, &names));
         }
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
         Ok(threads)
@@ -104,6 +111,7 @@ impl ClaudeProvider {
         &self,
         project_dir: &Path,
         cwd_filter: Option<&Path>,
+        names: &HashMap<String, String>,
     ) -> Vec<ThreadSummary> {
         let Ok(entries) = fs::read_dir(project_dir) else {
             return Vec::new();
@@ -120,7 +128,7 @@ impl ClaudeProvider {
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                 continue;
             }
-            if let Some(thread) = parse_claude_jsonl(&path, cwd_filter, &fallback_cwd) {
+            if let Some(thread) = parse_claude_jsonl(&path, cwd_filter, &fallback_cwd, names) {
                 threads.push(thread);
             }
         }
@@ -133,12 +141,14 @@ fn parse_claude_jsonl(
     path: &Path,
     cwd_filter: Option<&Path>,
     fallback_cwd: &Path,
+    names: &HashMap<String, String>,
 ) -> Option<ThreadSummary> {
     let text = fs::read_to_string(path).ok()?;
     let mut id = None;
     let mut created_at = None;
     let mut updated_at = None;
     let mut preview = None;
+    let mut custom_title = None;
     let mut cwd_from_file = None;
 
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -180,6 +190,26 @@ fn parse_claude_jsonl(
                 .and_then(|message| message.get("content"))
                 .and_then(first_json_text);
         }
+
+        match value.get("type").and_then(|value| value.as_str()) {
+            Some("custom-title") => {
+                custom_title = value
+                    .get("customTitle")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(ToString::to_string);
+            }
+            Some("agent-name") if custom_title.is_none() => {
+                custom_title = value
+                    .get("agentName")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(ToString::to_string);
+            }
+            _ => {}
+        }
     }
 
     let cwd = cwd_from_file
@@ -197,13 +227,12 @@ fn parse_claude_jsonl(
             .and_then(|name| name.to_str())
             .map(ToString::to_string)
     })?;
+    let name = custom_title.or_else(|| names.get(&id).cloned());
 
     Some(ThreadSummary {
         agent: AgentKind::Claude,
         id,
-        name: preview
-            .clone()
-            .map(|value| crate::common::truncate(&value, 64)),
+        name,
         cwd,
         created_at,
         updated_at,
@@ -212,6 +241,39 @@ fn parse_claude_jsonl(
         removable: Some(RemovalTarget::File(path.to_path_buf())),
         resume_hint: None,
     })
+}
+
+fn read_session_names(sessions_dir: &Path) -> HashMap<String, String> {
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return HashMap::new();
+    };
+
+    let mut names = HashMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(session_id) = value.get("sessionId").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(name) = value
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        names.insert(session_id.to_string(), name.to_string());
+    }
+    names
 }
 
 pub fn encode_project_path(path: &Path) -> String {
@@ -246,7 +308,37 @@ mod tests {
         let root = temp_dir("claude");
         let cwd = root.join("work");
         fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(root.join(".claude/sessions")).unwrap();
         let provider = ClaudeProvider::with_home(root.clone());
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            root.join(".claude/sessions/abc.json"),
+            "{\"sessionId\":\"abc\",\"name\":\"named claude\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello claude\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let threads = provider.list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "abc");
+        assert_eq!(threads[0].name.as_deref(), Some("named claude"));
+        assert_eq!(threads[0].preview.as_deref(), Some("hello claude"));
+    }
+
+    #[test]
+    fn leaves_name_empty_when_claude_session_name_is_missing() {
+        let root = temp_dir("claude-preview-name");
+        let cwd = root.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        let provider = ClaudeProvider::with_home(root);
         let project_dir = provider.project_dir_for(&cwd);
         fs::create_dir_all(&project_dir).unwrap();
         fs::write(
@@ -260,7 +352,30 @@ mod tests {
 
         let threads = provider.list_threads(&cwd).unwrap();
         assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].id, "abc");
+        assert_eq!(threads[0].name, None);
+        assert_eq!(threads[0].preview.as_deref(), Some("hello claude"));
+    }
+
+    #[test]
+    fn parses_claude_custom_title_from_transcript() {
+        let root = temp_dir("claude-custom-title");
+        let cwd = root.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        let provider = ClaudeProvider::with_home(root);
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello claude\"}}}}\n{{\"type\":\"custom-title\",\"customTitle\":\"renamed claude\",\"sessionId\":\"abc\"}}\n{{\"type\":\"agent-name\",\"agentName\":\"ignored fallback\",\"sessionId\":\"abc\"}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let threads = provider.list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].name.as_deref(), Some("renamed claude"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello claude"));
     }
 

@@ -492,14 +492,17 @@ fn ambiguous_error(candidates: Vec<&ThreadSummary>) -> String {
 
 fn print_threads(threads: &[ThreadSummary]) {
     const UPDATED_WIDTH: usize = 19;
-    const AGENT_WIDTH: usize = 10;
-    const ID_WIDTH: usize = 36;
-    const DIR_WIDTH: usize = 30;
 
-    let name_width = list_name_width(terminal_width());
+    let widths = list_column_widths(threads, terminal_width());
     println!(
-        "{:<UPDATED_WIDTH$} {:<AGENT_WIDTH$} {:<ID_WIDTH$} {:<DIR_WIDTH$} NAME",
-        "UPDATED", "AGENT", "ID", "DIR"
+        "{:<UPDATED_WIDTH$} {:<agent_width$} {:<id_width$} {:<dir_width$} NAME",
+        "UPDATED",
+        "AGENT",
+        "ID",
+        "DIR",
+        agent_width = widths.agent,
+        id_width = widths.id,
+        dir_width = widths.dir,
     );
     for thread in threads {
         let updated = thread
@@ -508,12 +511,15 @@ fn print_threads(threads: &[ThreadSummary]) {
             .map(format_display_time)
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<UPDATED_WIDTH$} {:<AGENT_WIDTH$} {:<ID_WIDTH$} {:<DIR_WIDTH$} {}",
+            "{:<UPDATED_WIDTH$} {:<agent_width$} {:<id_width$} {:<dir_width$} {}",
             updated,
             thread.agent.as_str(),
-            thread.id,
-            common::truncate(&shorten_path(&thread.cwd), DIR_WIDTH),
-            common::truncate(&thread_list_name(thread), name_width),
+            common::truncate(&thread.id, widths.id),
+            common::truncate(&shorten_path(&thread.cwd), widths.dir),
+            common::truncate(&thread_list_name(thread), widths.name),
+            agent_width = widths.agent,
+            id_width = widths.id,
+            dir_width = widths.dir,
         );
     }
 }
@@ -526,13 +532,69 @@ fn thread_list_name(thread: &ThreadSummary) -> String {
         .unwrap_or_else(|| thread.id.clone())
 }
 
-fn list_name_width(terminal_width: usize) -> usize {
-    const UPDATED_WIDTH: usize = 19;
-    const AGENT_WIDTH: usize = 10;
-    const ID_WIDTH: usize = 36;
-    const DIR_WIDTH: usize = 30;
+#[derive(Debug, PartialEq, Eq)]
+struct ListColumnWidths {
+    agent: usize,
+    id: usize,
+    dir: usize,
+    name: usize,
+}
 
-    let fixed_width = UPDATED_WIDTH + AGENT_WIDTH + ID_WIDTH + DIR_WIDTH;
+fn list_column_widths(threads: &[ThreadSummary], terminal_width: usize) -> ListColumnWidths {
+    const AGENT_MAX_WIDTH: usize = 10;
+    const ID_MAX_WIDTH: usize = 36;
+    const DIR_MAX_WIDTH: usize = 30;
+
+    let agent = bounded_column_width(
+        "AGENT",
+        threads
+            .iter()
+            .map(|thread| thread.agent.as_str().to_string()),
+        AGENT_MAX_WIDTH,
+    );
+    let id = bounded_column_width(
+        "ID",
+        threads.iter().map(|thread| thread.id.clone()),
+        ID_MAX_WIDTH,
+    );
+    let dir = bounded_column_width(
+        "DIR",
+        threads.iter().map(|thread| shorten_path(&thread.cwd)),
+        DIR_MAX_WIDTH,
+    );
+    let name = list_name_width_for_columns(terminal_width, agent, id, dir);
+
+    ListColumnWidths {
+        agent,
+        id,
+        dir,
+        name,
+    }
+}
+
+fn bounded_column_width(
+    header: &str,
+    values: impl IntoIterator<Item = String>,
+    max_width: usize,
+) -> usize {
+    values
+        .into_iter()
+        .map(|value| value.chars().count())
+        .chain(std::iter::once(header.chars().count()))
+        .max()
+        .unwrap_or(1)
+        .min(max_width)
+}
+
+fn list_name_width_for_columns(
+    terminal_width: usize,
+    agent_width: usize,
+    id_width: usize,
+    dir_width: usize,
+) -> usize {
+    const UPDATED_WIDTH: usize = 19;
+
+    let fixed_width = UPDATED_WIDTH + agent_width + id_width + dir_width;
     let separator_count = 4;
     terminal_width
         .saturating_sub(1)
@@ -783,13 +845,60 @@ mod tests {
     }
 
     #[test]
-    fn local_list_name_width_uses_remaining_terminal_width() {
-        assert_eq!(list_name_width(120), 20);
+    fn list_widths_use_actual_non_name_widths() {
+        let thread = ThreadSummary {
+            agent: AgentKind::Codex,
+            id: "abc123".to_string(),
+            name: Some("short thread".to_string()),
+            cwd: PathBuf::from("/tmp"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+
+        assert_eq!(
+            list_column_widths(&[thread], 120),
+            ListColumnWidths {
+                agent: 5,
+                id: 6,
+                dir: 4,
+                name: 81,
+            }
+        );
+    }
+
+    #[test]
+    fn list_widths_cap_long_non_name_columns() {
+        let thread = ThreadSummary {
+            agent: AgentKind::OpenCode,
+            id: "x".repeat(80),
+            name: None,
+            cwd: PathBuf::from("/a/very/long/path/that/should/not/consume/the/name/column"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: Some("preview".to_string()),
+            removable: None,
+            resume_hint: None,
+        };
+
+        assert_eq!(
+            list_column_widths(&[thread], 120),
+            ListColumnWidths {
+                agent: 8,
+                id: 36,
+                dir: 30,
+                name: 22,
+            }
+        );
     }
 
     #[test]
     fn small_terminal_preserves_some_name_width() {
-        assert_eq!(list_name_width(80), 1);
+        assert_eq!(list_name_width_for_columns(80, 10, 36, 30), 1);
     }
 
     #[test]

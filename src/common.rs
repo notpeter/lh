@@ -225,10 +225,10 @@ pub fn truncate(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value;
     }
-    let mut out = value
-        .chars()
-        .take(max_chars.saturating_sub(3))
-        .collect::<String>();
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let mut out = value.chars().take(max_chars - 3).collect::<String>();
     out.push_str("...");
     out
 }
@@ -254,5 +254,13 @@ mod tests {
         assert_eq!(AgentKind::parse("gemini-cli"), Some(AgentKind::Gemini));
         assert_eq!(AgentKind::parse("open-code"), Some(AgentKind::OpenCode));
         assert_eq!(AgentKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn truncate_respects_tiny_widths() {
+        assert_eq!(truncate("abcd", 0), "");
+        assert_eq!(truncate("abcd", 1), ".");
+        assert_eq!(truncate("abcd", 2), "..");
+        assert_eq!(truncate("abcd", 3), "...");
     }
 }
