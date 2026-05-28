@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Value, json};
+use time::OffsetDateTime;
 
 use crate::common::{
     AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ThreadSummary,
     default_executable,
 };
 use crate::util::{
-    canonicalize_existing, first_json_text, home_dir, parse_time, path_is_at_or_under,
+    canonicalize_existing, first_json_text, format_time, home_dir, parse_time, path_is_at_or_under,
 };
 
 pub struct ClaudeProvider {
@@ -103,6 +106,49 @@ impl AgentProvider for ClaudeProvider {
             default_executable("claude"),
             [OsString::from("--resume"), OsString::from(&thread.id)],
         ))
+    }
+
+    fn supports_rename(&self) -> bool {
+        true
+    }
+
+    fn rename_thread(&self, thread: &ThreadSummary, name: &str) -> LhResult<()> {
+        let path = thread
+            .source_path
+            .as_ref()
+            .ok_or("Claude thread is missing its transcript path")?;
+        let timestamp = format_time(OffsetDateTime::now_utc());
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "custom-title",
+                "customTitle": name,
+                "sessionId": thread.id,
+                "timestamp": timestamp,
+            })
+        )?;
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "agent-name",
+                "agentName": name,
+                "sessionId": thread.id,
+                "timestamp": timestamp,
+            })
+        )?;
+        update_session_name(&self.sessions_dir(), &thread.id, name)?;
+        Ok(())
+    }
+
+    fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
+        let path = thread
+            .source_path
+            .as_ref()
+            .ok_or("Claude thread is missing its transcript path")?;
+        claude_thread_content(path)
     }
 }
 
@@ -276,6 +322,57 @@ fn read_session_names(sessions_dir: &Path) -> HashMap<String, String> {
     names
 }
 
+fn update_session_name(sessions_dir: &Path, session_id: &str, name: &str) -> LhResult<()> {
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return Ok(());
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if value.get("sessionId").and_then(|value| value.as_str()) != Some(session_id) {
+            continue;
+        }
+        value["name"] = Value::String(name.to_string());
+        fs::write(path, serde_json::to_string_pretty(&value)?)?;
+    }
+    Ok(())
+}
+
+fn claude_thread_content(path: &Path) -> LhResult<String> {
+    let text = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("isMeta").and_then(|value| value.as_bool()) == Some(true) {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let role = message
+            .get("role")
+            .and_then(|value| value.as_str())
+            .or_else(|| value.get("type").and_then(|value| value.as_str()))
+            .unwrap_or("message");
+        let Some(content) = message.get("content").and_then(first_json_text) else {
+            continue;
+        };
+        out.push(format!("{role}: {content}"));
+    }
+    Ok(out.join("\n\n"))
+}
+
 pub fn encode_project_path(path: &Path) -> String {
     path.to_string_lossy().replace('/', "-")
 }
@@ -377,6 +474,38 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name.as_deref(), Some("renamed claude"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello claude"));
+    }
+
+    #[test]
+    fn renames_claude_thread() {
+        let root = temp_dir("claude-rename");
+        let cwd = root.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(root.join(".claude/sessions")).unwrap();
+        fs::write(
+            root.join(".claude/sessions/active.json"),
+            "{\"sessionId\":\"abc\",\"name\":\"old-name\"}\n",
+        )
+        .unwrap();
+        let provider = ClaudeProvider::with_home(root.clone());
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello claude\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+        provider.rename_thread(&thread, "new-name").unwrap();
+
+        let renamed = provider.list_threads(&cwd).unwrap().remove(0);
+        assert_eq!(renamed.name.as_deref(), Some("new-name"));
+        let session = fs::read_to_string(root.join(".claude/sessions/active.json")).unwrap();
+        assert!(session.contains("\"name\": \"new-name\""));
     }
 
     #[test]

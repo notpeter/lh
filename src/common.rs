@@ -192,6 +192,19 @@ pub trait AgentProvider {
     fn list_threads_global(&self) -> LhResult<Vec<ThreadSummary>>;
     fn new_command(&self, name: Option<&str>, cwd: &std::path::Path) -> LhResult<LaunchCommand>;
     fn resume_command(&self, thread: Option<&ThreadSummary>) -> LhResult<LaunchCommand>;
+    fn supports_rename(&self) -> bool {
+        false
+    }
+    fn rename_thread(&self, _thread: &ThreadSummary, _name: &str) -> LhResult<()> {
+        Err(format!("{} does not support native rename", self.kind()).into())
+    }
+    fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
+        let path = thread
+            .source_path
+            .as_ref()
+            .ok_or("selected thread does not expose source content")?;
+        Ok(std::fs::read_to_string(path)?)
+    }
 
     fn status(&self, cwd: &std::path::Path) -> AgentStatus {
         let history_path = self.history_path(cwd);

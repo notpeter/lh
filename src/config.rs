@@ -11,6 +11,15 @@ use crate::util::{APP_DIR_NAME, canonicalize_existing, home_dir};
 pub struct Config {
     #[serde(default)]
     pub alias: BTreeMap<String, String>,
+    pub llm: Option<LlmConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub prompt: String,
 }
 
 pub fn config_path() -> PathBuf {
@@ -232,6 +241,7 @@ mod tests {
                 (one.display().to_string(), two.display().to_string()),
                 (three.display().to_string(), two.display().to_string()),
             ]),
+            ..Default::default()
         };
 
         let one = canonicalize_existing(&one);
@@ -263,6 +273,7 @@ mod tests {
                 (three.display().to_string(), two.display().to_string()),
                 (unrelated.display().to_string(), other.display().to_string()),
             ]),
+            ..Default::default()
         };
 
         let aliases = aliases_for_dir_from_config(&config, &one);
@@ -288,6 +299,7 @@ mod tests {
 
         let config = Config {
             alias: BTreeMap::from([(one.display().to_string(), two.display().to_string())]),
+            ..Default::default()
         };
 
         assert!(aliases_for_dir_from_config(&config, &unrelated).is_empty());
@@ -308,6 +320,7 @@ mod tests {
                 (one.display().to_string(), two.display().to_string()),
                 (three.display().to_string(), two.display().to_string()),
             ]),
+            ..Default::default()
         };
         let two = canonicalize_existing(&two);
 

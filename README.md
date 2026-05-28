@@ -25,6 +25,9 @@ lh agents list
 
 lh new [agent] [name]
 lh resume [agent] [name-or-id]
+lh rename [thread-id] [new-name]
+lh rename [thread-id] --auto
+lh rename [thread-id] --auto --dry-run
 lh remove [agent] [name-or-id] --dry-run
 lh remove [agent] [name-or-id] --force
 
@@ -42,6 +45,29 @@ platform data directory.
 history and shows the 10 most recent rows by default. Use `-5`, `-10`, or any
 other numeric shorthand to change the row count; use `--all` for no limit.
 `lh info` prints full details for a selected thread, including its source path.
+`lh rename` updates the native agent title for providers with known writable
+title storage. `lh rename [thread-id] --auto` uses the optional `[llm]` config:
+
+```toml
+[llm]
+provider = "openai"
+# Optional; defaults to "gpt-5.4-nano" for OpenAI.
+model = "gpt-5.4-nano"
+prompt = """Summarize the contents of this thread extremely concisely.
+Create a multi-word-kebab-case-string of between 10-60 chars as title for this thread.
+Only output that single kebab-case string.
+"""
+```
+
+For `provider = "openai"`, `OPENAI_API_KEY` must be set in the environment.
+Supported providers and default models:
+
+| Provider | API key env var | Default model |
+| --- | --- | --- |
+| `openai` | `OPENAI_API_KEY` | `gpt-5.4-nano` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5` |
+| `xai` | `XAI_API_KEY` | `grok-latest` |
+| `gemini` | `GEMINI_API_KEY` | `gemini-3.1-flash-lite` |
 
 `lh alias ../other-clone` records the current directory as an alias of another
 directory in `~/.config/llm-history.toml`. `lh alias . ../other-clone` is

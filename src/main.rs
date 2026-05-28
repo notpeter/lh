@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod fuzzy;
 mod gemini;
+mod llm;
 mod opencode;
 mod providers;
 mod util;
@@ -46,6 +47,16 @@ enum Commands {
     Resume {
         agent_or_name: Option<String>,
         name: Option<String>,
+    },
+    Rename {
+        #[arg(short = 'g', long = "global")]
+        global: bool,
+        thread_id: String,
+        new_name: Option<String>,
+        #[arg(long)]
+        auto: bool,
+        #[arg(short = 'n', long)]
+        dry_run: bool,
     },
     Info {
         #[arg(short = 'g', long = "global")]
@@ -119,6 +130,13 @@ fn run() -> LhResult<()> {
             agent_or_name,
             name,
         } => resume(&cwd, agent_or_name, name),
+        Commands::Rename {
+            global,
+            thread_id,
+            new_name,
+            auto,
+            dry_run,
+        } => rename(&cwd, global, thread_id, new_name, auto, dry_run),
         Commands::Info {
             global,
             agent_or_name,
@@ -247,6 +265,43 @@ fn resume(cwd: &Path, agent_or_name: Option<String>, name: Option<String>) -> Lh
     }
     let command = provider.resume_command(thread.as_ref())?;
     command.exec()
+}
+
+fn rename(
+    cwd: &Path,
+    global: bool,
+    thread_id: String,
+    new_name: Option<String>,
+    auto: bool,
+    dry_run: bool,
+) -> LhResult<()> {
+    if auto == new_name.is_some() {
+        return Err("provide exactly one of [newname] or --auto".into());
+    }
+
+    let (provider, thread) = select_provider_thread(cwd, global, None, Some(&thread_id))?;
+    let thread = thread.ok_or("no thread selected")?;
+    if !provider.supports_rename() {
+        return Err(format!("{} does not support native rename", thread.agent).into());
+    }
+
+    let name = if auto {
+        let config = config::load()?;
+        let content = provider.thread_content(&thread)?;
+        llm::generate_thread_name(&config, &content)?
+    } else {
+        let name = new_name.unwrap();
+        validate_thread_name(&name)?
+    };
+
+    if dry_run {
+        println!("would rename {} {} to {}", thread.agent, thread.id, name);
+        return Ok(());
+    }
+
+    provider.rename_thread(&thread, &name)?;
+    println!("renamed {} {} to {}", thread.agent, thread.id, name);
+    Ok(())
 }
 
 fn info(
@@ -442,6 +497,17 @@ fn default_new_agent() -> AgentKind {
     AgentKind::Codex
 }
 
+fn validate_thread_name(name: &str) -> LhResult<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("thread name cannot be empty".into());
+    }
+    if name.contains('\n') || name.contains('\r') {
+        return Err("thread name must be a single line".into());
+    }
+    Ok(name.to_string())
+}
+
 fn select_provider_thread(
     cwd: &Path,
     global: bool,
@@ -610,7 +676,10 @@ fn print_thread_info(provider: &dyn AgentProvider, thread: &ThreadSummary) {
 
     field("Agent", thread.agent.display_name().to_string());
     field("ID", thread.id.clone());
-    field("Name", thread.display_name());
+    field(
+        "Name",
+        thread.name.clone().unwrap_or_else(|| "<unset>".to_string()),
+    );
     field("CWD", thread.cwd.display().to_string());
     field(
         "Created",

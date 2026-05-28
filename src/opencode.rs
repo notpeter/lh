@@ -72,6 +72,27 @@ impl AgentProvider for OpenCodeProvider {
             [OsString::from("--session"), OsString::from(&thread.id)],
         ))
     }
+
+    fn supports_rename(&self) -> bool {
+        true
+    }
+
+    fn rename_thread(&self, thread: &ThreadSummary, name: &str) -> LhResult<()> {
+        let conn = Connection::open(self.db_path())?;
+        let changed = conn.execute(
+            "update session set title = ?1 where id = ?2",
+            params![name, thread.id],
+        )?;
+        if changed == 0 {
+            return Err(format!("OpenCode session not found: {}", thread.id).into());
+        }
+        Ok(())
+    }
+
+    fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
+        let conn = Connection::open_with_flags(self.db_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(text_parts(&conn, &thread.id)?.join("\n\n"))
+    }
 }
 
 impl OpenCodeProvider {
@@ -150,6 +171,10 @@ impl OpenCodeProvider {
 }
 
 fn first_text_part(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<String>> {
+    Ok(text_parts(conn, session_id)?.into_iter().next())
+}
+
+fn text_parts(conn: &Connection, session_id: &str) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "select p.data
          from part p
@@ -158,6 +183,7 @@ fn first_text_part(conn: &Connection, session_id: &str) -> rusqlite::Result<Opti
          order by p.time_created asc",
     )?;
     let mut rows = stmt.query(params![session_id])?;
+    let mut parts = Vec::new();
     while let Some(row) = rows.next()? {
         let data: String = row.get(0)?;
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
@@ -166,10 +192,10 @@ fn first_text_part(conn: &Connection, session_id: &str) -> rusqlite::Result<Opti
         if value.get("type").and_then(|value| value.as_str()) == Some("text")
             && let Some(text) = value.get("text").and_then(|value| value.as_str())
         {
-            return Ok(Some(text.to_string()));
+            parts.push(text.to_string());
         }
     }
-    Ok(None)
+    Ok(parts)
 }
 
 pub fn delete_session_from_db(db_path: &Path, session_id: &str) -> LhResult<()> {
@@ -241,6 +267,40 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name.as_deref(), Some("Title"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello opencode"));
+    }
+
+    #[test]
+    fn renames_opencode_thread() {
+        let root = temp_dir("opencode-rename");
+        let cwd = root.join("work");
+        let db_dir = root.join(".local/share/opencode");
+        fs::create_dir_all(&db_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let conn = Connection::open(db_dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "create table project (id text primary key, worktree text not null);
+             create table session (id text primary key, project_id text not null, slug text not null, title text not null, directory text not null, time_created integer not null, time_updated integer not null);
+             create table message (id text primary key, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);
+             create table part (id text primary key, message_id text not null, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into project values ('p', ?1)",
+            params![cwd.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into session values ('s', 'p', 'slug', 'Old', ?1, 1000, 2000)",
+            params![cwd.to_string_lossy()],
+        )
+        .unwrap();
+        let provider = OpenCodeProvider::with_home(root);
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.rename_thread(&thread, "New").unwrap();
+
+        let renamed = provider.list_threads(&cwd).unwrap().remove(0);
+        assert_eq!(renamed.name.as_deref(), Some("New"));
     }
 
     #[test]

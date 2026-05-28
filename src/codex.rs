@@ -1,16 +1,19 @@
 use std::ffi::OsString;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Value, json};
+use time::OffsetDateTime;
 
 use crate::common::{
     AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ThreadSummary,
     default_executable,
 };
 use crate::util::{
-    canonicalize_existing, collect_files_with_name_prefix, first_json_text, home_dir, parse_time,
-    path_is_at_or_under,
+    canonicalize_existing, collect_files_with_name_prefix, first_json_text, format_time, home_dir,
+    parse_time, path_is_at_or_under,
 };
 
 pub struct CodexProvider {
@@ -73,6 +76,36 @@ impl AgentProvider for CodexProvider {
             args.push(OsString::from("--last"));
         }
         Ok(LaunchCommand::new(default_executable("codex"), args))
+    }
+
+    fn supports_rename(&self) -> bool {
+        true
+    }
+
+    fn rename_thread(&self, thread: &ThreadSummary, name: &str) -> LhResult<()> {
+        let path = self.index_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "id": thread.id,
+                "thread_name": name,
+                "updated_at": format_time(OffsetDateTime::now_utc()),
+            })
+        )?;
+        Ok(())
+    }
+
+    fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
+        let path = thread
+            .source_path
+            .as_ref()
+            .ok_or("Codex thread is missing its rollout path")?;
+        codex_thread_content(path)
     }
 }
 
@@ -218,6 +251,36 @@ fn codex_user_text(value: &Value) -> Option<String> {
     }
 }
 
+fn codex_thread_content(path: &Path) -> LhResult<String> {
+    let text = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(text) = codex_user_text(&value) {
+            out.push(format!("user: {text}"));
+            continue;
+        }
+        if value.get("type").and_then(|value| value.as_str()) == Some("response_item") {
+            let Some(payload) = value.get("payload") else {
+                continue;
+            };
+            let role = payload
+                .get("role")
+                .and_then(|value| value.as_str())
+                .unwrap_or("assistant");
+            if role == "user" {
+                continue;
+            }
+            if let Some(text) = payload.get("content").and_then(first_json_text) {
+                out.push(format!("{role}: {text}"));
+            }
+        }
+    }
+    Ok(out.join("\n\n"))
+}
+
 fn is_noise_user_text(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with("<environment_context>")
@@ -256,6 +319,29 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name.as_deref(), Some("named codex"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello codex"));
+    }
+
+    #[test]
+    fn renames_codex_thread() {
+        let root = temp_dir("codex-rename");
+        let cwd = root.join("work");
+        fs::create_dir_all(root.join(".codex/sessions/2026/05/27")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            root.join(".codex/sessions/2026/05/27/rollout-test.jsonl"),
+            format!(
+                "{{\"timestamp\":\"2026-05-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"abc\",\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        let provider = CodexProvider::with_home(root);
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.rename_thread(&thread, "new-codex-name").unwrap();
+
+        let renamed = provider.list_threads(&cwd).unwrap().remove(0);
+        assert_eq!(renamed.name.as_deref(), Some("new-codex-name"));
     }
 
     #[test]
