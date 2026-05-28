@@ -91,12 +91,14 @@ enum Commands {
     Alias {
         #[arg(short = 's', help = "Accepted for ln compatibility")]
         symbolic: bool,
+        #[arg(short = 'd', long = "delete", help = "Remove directory aliases")]
+        delete: bool,
         #[arg(help = "Alias source, or target when used alone")]
         source_or_target: Option<PathBuf>,
         #[arg(help = "Alias target when SOURCE-OR-TARGET is provided")]
         target: Option<PathBuf>,
     },
-    #[command(about = "Remove directory aliases")]
+    #[command(about = "Remove directory aliases", hide = true)]
     Unalias {
         #[arg(help = "Directory whose aliases should be removed")]
         dir: Option<PathBuf>,
@@ -125,8 +127,8 @@ enum Commands {
         )]
         dry_run: bool,
     },
-    #[command(about = "Inspect configured agent providers")]
-    Agents {
+    #[command(about = "Inspect configured agent providers", alias = "agents")]
+    Agent {
         #[command(subcommand)]
         command: AgentsCommand,
     },
@@ -139,7 +141,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AgentsCommand {
-    #[command(about = "Show provider status")]
+    #[command(about = "Show provider status", alias = "ls")]
     List,
 }
 
@@ -190,9 +192,10 @@ fn run() -> LhResult<()> {
         } => info(&cwd, global, agent_or_name, name),
         Commands::Alias {
             symbolic,
+            delete,
             source_or_target,
             target,
-        } => alias(&cwd, symbolic, source_or_target, target),
+        } => alias(&cwd, symbolic, delete, source_or_target, target),
         Commands::Unalias { dir } => unalias(&cwd, dir),
         Commands::Cd { dir } => cd(&cwd, dir),
         Commands::Remove {
@@ -201,7 +204,7 @@ fn run() -> LhResult<()> {
             force,
             dry_run,
         } => remove(&cwd, target, name, force, dry_run),
-        Commands::Agents {
+        Commands::Agent {
             command: AgentsCommand::List,
         } => agents_list(&cwd),
         Commands::Db { command } => match command {
@@ -422,10 +425,21 @@ fn info(
 
 fn alias(
     cwd: &Path,
-    _symbolic: bool,
+    symbolic: bool,
+    delete: bool,
     source_or_target: Option<PathBuf>,
     target: Option<PathBuf>,
 ) -> LhResult<()> {
+    if delete {
+        if symbolic {
+            return Err("alias -d cannot be combined with -s".into());
+        }
+        if target.is_some() {
+            return Err("alias -d accepts at most one directory".into());
+        }
+        return unalias(cwd, source_or_target);
+    }
+
     let Some(source_or_target) = source_or_target else {
         return print_aliases(cwd);
     };
@@ -537,32 +551,69 @@ fn parse_remove_selector(
 }
 
 fn agents_list(cwd: &Path) -> LhResult<()> {
-    println!(
-        "{:<10} {:<7} {:<28} CAVEAT",
-        "AGENT", "HISTORY", "EXECUTABLE"
-    );
-    for provider in providers::all() {
+    for (index, provider) in providers::all().into_iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
         let status = provider.status(cwd);
-        let executable = status
+        let path = status.executable.as_ref().map(|path| shorten_path(path));
+        let target = status
             .executable
             .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let executable = status
+            .and_then(|path| symlink_target(path))
+            .map(|path| shorten_path(&path));
+        let path = path.unwrap_or_else(|| "-".to_string());
+        let version = status
             .version
             .as_ref()
-            .map(|version| format!("{executable} ({version})"))
-            .unwrap_or(executable);
-        println!(
-            "{:<10} {:<7} {:<28} {}",
-            status.agent.display_name(),
-            if status.history_exists { "yes" } else { "no" },
-            executable,
-            status.caveat.unwrap_or_default()
-        );
-        println!("           history: {}", status.history_path.display());
+            .map(|version| version_display(version))
+            .unwrap_or_else(|| "-".to_string());
+        println!("{}:", status.agent.as_str());
+        print_agent_value("path:", &path);
+        if let Some(target) = target.as_deref() {
+            print_agent_value("target:", target);
+        }
+        print_agent_value("version:", &version);
+        print_agent_value("history:", &shorten_path(&status.history_path));
+        print_agent_value("threads:", &status.thread_count.to_string());
+        if let Some(caveat) = status.caveat.as_deref() {
+            print_agent_value("caveat:", caveat);
+        }
     }
     Ok(())
+}
+
+fn print_agent_value(label: &str, value: &str) {
+    println!("  {label:<11}{value}");
+}
+
+fn symlink_target(path: &Path) -> Option<PathBuf> {
+    if !fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    let target = fs::read_link(path).ok()?;
+    let target = if target.is_absolute() {
+        target
+    } else {
+        path.parent()?.join(target)
+    };
+    Some(fs::canonicalize(&target).unwrap_or(target))
+}
+
+fn version_display(version: &str) -> String {
+    version
+        .split_whitespace()
+        .find_map(|part| {
+            let part = part.trim_matches(|ch: char| {
+                ch == '(' || ch == ')' || ch == ',' || ch == ';' || ch == ':'
+            });
+            part.chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_digit())
+                .then_some(part)
+        })
+        .unwrap_or(version)
+        .to_string()
 }
 
 fn parse_new_args(
@@ -1123,6 +1174,78 @@ mod tests {
                 if error.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
                     && error.to_string().contains("Usage: lh remove")
         ));
+    }
+
+    #[test]
+    fn top_level_help_hides_unalias() {
+        let result = Cli::try_parse_from(strings(&["lh", "--help"]));
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.kind() == clap::error::ErrorKind::DisplayHelp
+                    && !error.to_string().contains("unalias")
+        ));
+    }
+
+    #[test]
+    fn alias_delete_parses_optional_directory() {
+        let cli = Cli::try_parse_from(strings(&["lh", "alias", "-d", "../other"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Alias {
+                delete: true,
+                source_or_target: Some(_),
+                target: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn agent_ls_aliases_agent_list() {
+        let cli = Cli::try_parse_from(strings(&["lh", "agent", "ls"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Agent {
+                command: AgentsCommand::List
+            })
+        ));
+    }
+
+    #[test]
+    fn agents_aliases_agent() {
+        let cli = Cli::try_parse_from(strings(&["lh", "agents", "list"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Agent {
+                command: AgentsCommand::List
+            })
+        ));
+    }
+
+    #[test]
+    fn version_display_uses_first_version_token() {
+        assert_eq!(version_display("2.1.154 (Claude Code)"), "2.1.154");
+        assert_eq!(version_display("codex-cli 0.134.0"), "0.134.0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_resolves_relative_links() {
+        let root = crate::util::temp_dir("agent-path-display");
+        let target = root.join("target");
+        let link = root.join("link");
+        fs::write(&target, "").unwrap();
+        std::os::unix::fs::symlink("target", &link).unwrap();
+
+        assert_eq!(
+            symlink_target(&link),
+            Some(fs::canonicalize(&target).unwrap())
+        );
     }
 
     #[test]

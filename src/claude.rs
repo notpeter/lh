@@ -31,6 +31,7 @@ impl ClaudeProvider {
         Self { home }
     }
 
+    #[cfg(test)]
     pub fn project_dir_for(&self, cwd: &Path) -> PathBuf {
         self.home
             .join(".claude/projects")
@@ -47,8 +48,8 @@ impl AgentProvider for ClaudeProvider {
         AgentKind::Claude
     }
 
-    fn history_path(&self, cwd: &Path) -> PathBuf {
-        self.project_dir_for(cwd)
+    fn history_path(&self, _cwd: &Path) -> PathBuf {
+        self.home.join(".claude/projects")
     }
 
     fn executable(&self) -> Option<PathBuf> {
@@ -410,6 +411,7 @@ fn claude_thread_content(path: &Path) -> LhResult<String> {
     Ok(out.join("\n\n"))
 }
 
+#[cfg(test)]
 pub fn encode_project_path(path: &Path) -> String {
     path.to_string_lossy().replace('/', "-")
 }

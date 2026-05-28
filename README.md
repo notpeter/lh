@@ -18,10 +18,11 @@ lh info [agent] [name-or-id]
 lh info -g [agent] [name-or-id]
 lh alias [target]
 lh alias [alias] [target]
-lh unalias [dir]
+lh alias -d [dir]
 lh ln [-s] [alias] [target]
 lh cd [alias-query]
-lh agents list
+lh agent list
+lh agent ls
 
 lh new [agent] [name]
 lh resume [agent] [name-or-id]
@@ -74,7 +75,7 @@ directory in `~/.config/llm-history.toml`. `lh alias . ../other-clone` is
 equivalent. Running `lh alias` without arguments prints aliases that impact the
 current directory. Aliased directories share local listings and selection, while
 the `DIR` column shows which checkout owns each thread. `lh cd foo2` opens a
-shell in a matching aliased directory. `lh unalias` removes aliases involving
+shell in a matching aliased directory. `lh alias -d` removes aliases involving
 the current directory; pass a directory to remove aliases involving that
 directory.
 

@@ -178,7 +178,7 @@ impl LaunchCommand {
 pub struct AgentStatus {
     pub agent: AgentKind,
     pub history_path: PathBuf,
-    pub history_exists: bool,
+    pub thread_count: usize,
     pub executable: Option<PathBuf>,
     pub version: Option<String>,
     pub caveat: Option<String>,
@@ -212,11 +212,15 @@ pub trait AgentProvider {
     fn status(&self, cwd: &std::path::Path) -> AgentStatus {
         let history_path = self.history_path(cwd);
         let executable = self.executable();
-        let history_exists = history_path.exists();
+        let thread_count = self
+            .list_threads_global()
+            .map(|threads| threads.len())
+            .unwrap_or_default();
+        let history_exists = history_path.exists() || thread_count > 0;
         let version = executable.as_ref().and_then(|path| command_version(path));
         let caveat = match (history_exists, executable.is_some()) {
             (true, false) => Some("history found, executable missing".to_string()),
-            (false, true) => Some("no current-directory history found".to_string()),
+            (false, true) => Some("no history found".to_string()),
             (false, false) => Some("history and executable missing".to_string()),
             (true, true) => None,
         };
@@ -224,7 +228,7 @@ pub trait AgentProvider {
         AgentStatus {
             agent: self.kind(),
             history_path,
-            history_exists,
+            thread_count,
             executable,
             version,
             caveat,

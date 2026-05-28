@@ -36,8 +36,8 @@ impl AgentProvider for GeminiProvider {
         AgentKind::Gemini
     }
 
-    fn history_path(&self, cwd: &Path) -> PathBuf {
-        find_project_dir(&self.tmp_dir(), cwd).unwrap_or_else(|| self.tmp_dir())
+    fn history_path(&self, _cwd: &Path) -> PathBuf {
+        self.tmp_dir()
     }
 
     fn executable(&self) -> Option<PathBuf> {
@@ -140,25 +140,6 @@ impl GeminiProvider {
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
         threads
     }
-}
-
-fn find_project_dir(tmp_dir: &Path, cwd: &Path) -> Option<PathBuf> {
-    let canonical_cwd = canonicalize_existing(cwd);
-    let entries = fs::read_dir(tmp_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let project_root = path.join(".project_root");
-        let Some(root) = read_to_string(&project_root) else {
-            continue;
-        };
-        if canonicalize_existing(Path::new(root.trim())) == canonical_cwd {
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn read_gemini_logs(path: &Path) -> Option<Vec<Value>> {
