@@ -63,7 +63,10 @@ enum Commands {
         thread_id: String,
         #[arg(help = "New title for the selected thread")]
         new_name: Option<String>,
-        #[arg(long, help = "Generate a title from the thread transcript")]
+        #[arg(
+            long,
+            help = "Generate a title from the thread transcript (default when NEW_NAME is omitted)"
+        )]
         auto: bool,
         #[arg(long, help = "Clear the selected thread's native title")]
         unset: bool,
@@ -255,10 +258,17 @@ fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
         return args;
     }
 
-    let first = args[1].to_string_lossy();
-    if matches!(first.as_ref(), "-g" | "--global" | "--all" | "--limit")
-        || is_numeric_limit_arg(&args[1])
+    if is_global_arg(&args[1])
+        && args
+            .get(2)
+            .and_then(|arg| arg.to_str())
+            .is_some_and(global_flag_subcommand)
     {
+        let global = args.remove(1);
+        args.insert(2, global);
+    }
+
+    if is_list_shortcut_arg(&args[1]) || is_numeric_limit_arg(&args[1]) {
         args.insert(1, OsString::from("list"));
     }
 
@@ -281,6 +291,20 @@ fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
         }
     }
     normalized
+}
+
+fn is_list_shortcut_arg(arg: &OsString) -> bool {
+    let value = arg.to_string_lossy();
+    is_global_arg(arg) || matches!(value.as_ref(), "--all" | "--limit")
+}
+
+fn is_global_arg(arg: &OsString) -> bool {
+    let value = arg.to_string_lossy();
+    matches!(value.as_ref(), "-g" | "--global")
+}
+
+fn global_flag_subcommand(arg: &str) -> bool {
+    matches!(arg, "list" | "ls" | "rename" | "info")
 }
 
 fn is_numeric_limit_arg(arg: &OsString) -> bool {
@@ -319,10 +343,7 @@ fn rename(
     unset: bool,
     dry_run: bool,
 ) -> LhResult<()> {
-    let rename_modes = usize::from(new_name.is_some()) + usize::from(auto) + usize::from(unset);
-    if rename_modes != 1 {
-        return Err("provide exactly one of [newname], --auto, or --unset".into());
-    }
+    let mode = parse_rename_mode(new_name, auto, unset)?;
 
     let (provider, thread) = select_provider_thread(cwd, global, None, Some(&thread_id))?;
     let thread = thread.ok_or("no thread selected")?;
@@ -330,24 +351,29 @@ fn rename(
         return Err(format!("{} does not support native rename", thread.agent).into());
     }
 
-    if unset {
-        if dry_run {
-            println!("would unset name for {} {}", thread.agent, thread.id);
+    let name = match mode {
+        RenameMode::Unset => {
+            if dry_run {
+                println!("would unset name for {} {}", thread.agent, thread.id);
+                return Ok(());
+            }
+
+            provider.unset_thread_name(&thread)?;
+            println!("unset name for {} {}", thread.agent, thread.id);
             return Ok(());
         }
-
-        provider.unset_thread_name(&thread)?;
-        println!("unset name for {} {}", thread.agent, thread.id);
-        return Ok(());
-    }
-
-    let name = if auto {
-        let config = config::load()?;
-        let content = provider.thread_content(&thread)?;
-        llm::generate_thread_name(&config, &content)?
-    } else {
-        let name = new_name.unwrap();
-        validate_thread_name(&name)?
+        RenameMode::Manual(name) => name,
+        RenameMode::Auto => {
+            let config = config::load()?;
+            if config.llm.is_none() {
+                return Err(
+                    "provide a new name to rename this thread (or for auto rename configure an llm provider)"
+                        .into(),
+                );
+            }
+            let content = provider.thread_content(&thread)?;
+            llm::generate_thread_name(&config, &content)?
+        }
     };
 
     if dry_run {
@@ -358,6 +384,27 @@ fn rename(
     provider.rename_thread(&thread, &name)?;
     println!("renamed {} {} to {}", thread.agent, thread.id, name);
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RenameMode {
+    Auto,
+    Manual(String),
+    Unset,
+}
+
+fn parse_rename_mode(new_name: Option<String>, auto: bool, unset: bool) -> LhResult<RenameMode> {
+    let rename_modes = usize::from(new_name.is_some()) + usize::from(unset);
+    if rename_modes > 1 || (auto && rename_modes > 0) {
+        return Err("provide at most one of [newname], --auto, or --unset".into());
+    }
+    if unset {
+        return Ok(RenameMode::Unset);
+    }
+    if let Some(name) = new_name {
+        return Ok(RenameMode::Manual(validate_thread_name(&name)?));
+    }
+    Ok(RenameMode::Auto)
 }
 
 fn info(
@@ -998,6 +1045,63 @@ mod tests {
         assert_eq!(
             normalize_args(strings(&["lh", "-g", "-10"])),
             strings(&["lh", "list", "-g", "--limit", "10"])
+        );
+    }
+
+    #[test]
+    fn moves_global_flag_in_front_of_rename() {
+        assert_eq!(
+            normalize_args(strings(&[
+                "lh",
+                "-g",
+                "rename",
+                "abc123",
+                "--unset",
+                "--dry-run"
+            ])),
+            strings(&["lh", "rename", "-g", "abc123", "--unset", "--dry-run"])
+        );
+    }
+
+    #[test]
+    fn moves_global_flag_in_front_of_info() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "--global", "info", "abc123"])),
+            strings(&["lh", "info", "--global", "abc123"])
+        );
+    }
+
+    #[test]
+    fn rename_defaults_to_auto_when_name_is_omitted() {
+        assert_eq!(
+            parse_rename_mode(None, false, false).unwrap(),
+            RenameMode::Auto
+        );
+    }
+
+    #[test]
+    fn rename_accepts_explicit_auto() {
+        assert_eq!(
+            parse_rename_mode(None, true, false).unwrap(),
+            RenameMode::Auto
+        );
+    }
+
+    #[test]
+    fn rename_accepts_manual_name() {
+        assert_eq!(
+            parse_rename_mode(Some("manual name".to_string()), false, false).unwrap(),
+            RenameMode::Manual("manual name".to_string())
+        );
+    }
+
+    #[test]
+    fn rename_rejects_manual_name_with_auto() {
+        let error = parse_rename_mode(Some("manual name".to_string()), true, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "provide at most one of [newname], --auto, or --unset"
         );
     }
 
