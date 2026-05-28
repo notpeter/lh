@@ -28,8 +28,8 @@ lh resume [agent] [name-or-id]
 lh rename [thread-id] [new-name]
 lh rename [thread-id] --auto
 lh rename [thread-id] --auto --dry-run
-lh remove [agent] [name-or-id] --dry-run
-lh remove [agent] [name-or-id] --force
+lh remove <name-or-id> --dry-run
+lh remove <agent> <name-or-id> --force
 
 lh db init
 lh db refresh

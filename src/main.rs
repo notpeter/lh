@@ -31,65 +31,101 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "List agent threads for the current directory")]
     #[command(alias = "ls")]
     List {
-        #[arg(short = 'g', long = "global")]
+        #[arg(short = 'g', long = "global", help = "Scan all known agent history")]
         global: bool,
-        #[arg(long)]
+        #[arg(long, help = "Show all matching threads without the default limit")]
         all: bool,
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", help = "Limit the number of rows shown")]
         limit: Option<usize>,
     },
+    #[command(about = "Start a new agent thread")]
     New {
+        #[arg(help = "Agent to launch, or the new thread name when used alone")]
         agent: Option<String>,
+        #[arg(help = "Name for the new thread when AGENT is provided")]
         name: Option<String>,
     },
+    #[command(about = "Resume an existing agent thread")]
     Resume {
+        #[arg(help = "Thread name/id to resume, or agent when followed by NAME-OR-ID")]
         agent_or_name: Option<String>,
+        #[arg(help = "Thread name/id when AGENT-OR-NAME is an agent")]
         name: Option<String>,
     },
+    #[command(about = "Rename a native agent thread")]
     Rename {
-        #[arg(short = 'g', long = "global")]
+        #[arg(short = 'g', long = "global", help = "Search all known agent history")]
         global: bool,
+        #[arg(help = "Thread id to rename")]
         thread_id: String,
+        #[arg(help = "New title for the selected thread")]
         new_name: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Generate a title from the thread transcript")]
         auto: bool,
-        #[arg(short = 'n', long)]
+        #[arg(
+            short = 'n',
+            long,
+            help = "Print the proposed rename without changing history"
+        )]
         dry_run: bool,
     },
+    #[command(about = "Show full details for a selected thread")]
     Info {
-        #[arg(short = 'g', long = "global")]
+        #[arg(short = 'g', long = "global", help = "Search all known agent history")]
         global: bool,
+        #[arg(help = "Thread name/id to inspect, or agent when followed by NAME-OR-ID")]
         agent_or_name: Option<String>,
+        #[arg(help = "Thread name/id when AGENT-OR-NAME is an agent")]
         name: Option<String>,
     },
+    #[command(about = "Link the current directory with another checkout")]
     #[command(alias = "ln")]
     Alias {
-        #[arg(short = 's')]
+        #[arg(short = 's', help = "Accepted for ln compatibility")]
         symbolic: bool,
+        #[arg(help = "Alias source, or target when used alone")]
         source_or_target: Option<PathBuf>,
+        #[arg(help = "Alias target when SOURCE-OR-TARGET is provided")]
         target: Option<PathBuf>,
     },
+    #[command(about = "Remove directory aliases")]
     Unalias {
+        #[arg(help = "Directory whose aliases should be removed")]
         dir: Option<PathBuf>,
     },
+    #[command(about = "Open a shell in a matching aliased directory")]
     Cd {
+        #[arg(help = "Alias query to match")]
         dir: Option<String>,
     },
-    #[command(alias = "rm")]
+    #[command(about = "Remove a selected thread from native history")]
+    #[command(alias = "rm", arg_required_else_help = true)]
     Remove {
-        agent: Option<String>,
+        #[arg(value_name = "TARGET", help = "Thread name/id to remove")]
+        target: String,
+        #[arg(
+            value_name = "NAME-OR-ID",
+            help = "Thread name/id when TARGET is an agent"
+        )]
         name: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, help = "Remove without prompting for confirmation")]
         force: bool,
-        #[arg(short = 'n', long)]
+        #[arg(
+            short = 'n',
+            long,
+            help = "Print what would be removed without deleting"
+        )]
         dry_run: bool,
     },
+    #[command(about = "Inspect configured agent providers")]
     Agents {
         #[command(subcommand)]
         command: AgentsCommand,
     },
+    #[command(about = "Manage the optional SQLite cache")]
     Db {
         #[command(subcommand)]
         command: DbCommand,
@@ -98,13 +134,17 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AgentsCommand {
+    #[command(about = "Show provider status")]
     List,
 }
 
 #[derive(Subcommand)]
 enum DbCommand {
+    #[command(about = "Initialize the optional SQLite cache")]
     Init,
+    #[command(about = "Refresh the optional SQLite cache")]
     Refresh,
+    #[command(about = "Drop the optional SQLite cache")]
     Drop,
 }
 
@@ -150,11 +190,11 @@ fn run() -> LhResult<()> {
         Commands::Unalias { dir } => unalias(&cwd, dir),
         Commands::Cd { dir } => cd(&cwd, dir),
         Commands::Remove {
-            agent,
+            target,
             name,
             force,
             dry_run,
-        } => remove(&cwd, agent, name, force, dry_run),
+        } => remove(&cwd, target, name, force, dry_run),
         Commands::Agents {
             command: AgentsCommand::List,
         } => agents_list(&cwd),
@@ -380,13 +420,13 @@ fn cd(cwd: &Path, query: Option<String>) -> LhResult<()> {
 
 fn remove(
     cwd: &Path,
-    agent_or_name: Option<String>,
+    target: String,
     name: Option<String>,
     force: bool,
     dry_run: bool,
 ) -> LhResult<()> {
-    let (agent, query) = parse_selector(agent_or_name, name)?;
-    let (_provider, thread) = select_provider_thread(cwd, false, agent, query.as_deref())?;
+    let (agent, query) = parse_remove_selector(target, name)?;
+    let (_provider, thread) = select_provider_thread(cwd, false, agent, Some(&query))?;
     let thread = thread.ok_or("no thread selected")?;
     let target = thread
         .removable
@@ -407,6 +447,30 @@ fn remove(
     execute_removal(target)?;
     println!("removed {description}");
     Ok(())
+}
+
+fn parse_remove_selector(
+    target: String,
+    name: Option<String>,
+) -> LhResult<(Option<AgentKind>, String)> {
+    match name {
+        Some(name) => {
+            let agent = AgentKind::parse(&target).ok_or_else(|| {
+                format!("unknown agent '{target}' in two-argument remove command")
+            })?;
+            Ok((Some(agent), name))
+        }
+        None => {
+            if AgentKind::parse(&target).is_some() {
+                Err(
+                    format!("remove requires a thread name or id; '{target}' is an agent name")
+                        .into(),
+                )
+            } else {
+                Ok((None, target))
+            }
+        }
+    }
 }
 
 fn agents_list(cwd: &Path) -> LhResult<()> {
@@ -544,13 +608,29 @@ fn select_provider_thread(
 }
 
 fn ambiguous_error(candidates: Vec<&ThreadSummary>) -> String {
-    let mut out = String::from("ambiguous match; use a more specific query. Candidates:");
-    for thread in candidates.into_iter().take(5) {
+    let candidates = candidates.into_iter().take(5).collect::<Vec<_>>();
+    let agent_width = candidates
+        .iter()
+        .map(|thread| thread.agent.as_str().len())
+        .chain([5])
+        .max()
+        .unwrap_or(5);
+    let id_width = candidates
+        .iter()
+        .map(|thread| thread.id.len())
+        .chain([2])
+        .max()
+        .unwrap_or(2);
+
+    let mut out = String::from("ambiguous match; use a more specific query:");
+    for thread in candidates {
         out.push_str(&format!(
-            "\n  {} {} {}",
-            thread.agent,
-            thread.id,
-            thread.display_name()
+            "\n  {agent:<agent_width$}  {id:<id_width$}  {name}",
+            agent = thread.agent.as_str(),
+            id = thread.id,
+            name = thread.display_name(),
+            agent_width = agent_width,
+            id_width = id_width
         ));
     }
     out
@@ -910,6 +990,69 @@ mod tests {
         assert_eq!(
             normalize_args(strings(&["lh", "resume", "-10"])),
             strings(&["lh", "resume", "-10"])
+        );
+    }
+
+    #[test]
+    fn bare_remove_shows_help() {
+        let result = Cli::try_parse_from(strings(&["lh", "rm"]));
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                    && error.to_string().contains("Usage: lh remove")
+        ));
+    }
+
+    #[test]
+    fn remove_rejects_lone_agent_selector() {
+        let error = parse_remove_selector("codex".to_string(), None).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "remove requires a thread name or id; 'codex' is an agent name"
+        );
+    }
+
+    #[test]
+    fn remove_accepts_agent_when_name_is_present() {
+        assert_eq!(
+            parse_remove_selector("codex".to_string(), Some("abc123".to_string())).unwrap(),
+            (Some(AgentKind::Codex), "abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn ambiguous_error_aligns_candidate_columns() {
+        let opencode = ThreadSummary {
+            agent: AgentKind::OpenCode,
+            id: "ses_196465859ffeQn1sT67NGi5Pof".to_string(),
+            name: Some("adding-mit-license-to-cargo-toml".to_string()),
+            cwd: PathBuf::from("/tmp"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+        let codex = ThreadSummary {
+            agent: AgentKind::Codex,
+            id: "019e69d6-1fae-7052-b26c-71824873dae7".to_string(),
+            name: Some("create-llm-history-lh-cli".to_string()),
+            cwd: PathBuf::from("/tmp"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+
+        assert_eq!(
+            ambiguous_error(vec![&opencode, &codex]),
+            "ambiguous match; use a more specific query:\n  opencode  ses_196465859ffeQn1sT67NGi5Pof        adding-mit-license-to-cargo-toml\n  codex     019e69d6-1fae-7052-b26c-71824873dae7  create-llm-history-lh-cli"
         );
     }
 
