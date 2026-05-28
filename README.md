@@ -45,10 +45,12 @@ other numeric shorthand to change the row count; use `--all` for no limit.
 
 `lh alias ../other-clone` records the current directory as an alias of another
 directory in `~/.config/llm-history.toml`. `lh alias . ../other-clone` is
-equivalent. Aliased directories share local listings and selection, while the
-`DIR` column shows which checkout owns each thread. `lh cd foo2` opens a shell
-in a matching aliased directory. `lh unalias` removes aliases involving the
-current directory; pass a directory to remove aliases involving that directory.
+equivalent. Running `lh alias` without arguments prints aliases that impact the
+current directory. Aliased directories share local listings and selection, while
+the `DIR` column shows which checkout owns each thread. `lh cd foo2` opens a
+shell in a matching aliased directory. `lh unalias` removes aliases involving
+the current directory; pass a directory to remove aliases involving that
+directory.
 
 ## License
 

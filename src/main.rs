@@ -269,7 +269,7 @@ fn alias(
     target: Option<PathBuf>,
 ) -> LhResult<()> {
     let Some(source_or_target) = source_or_target else {
-        return print_aliases();
+        return print_aliases(cwd);
     };
 
     let (source, target) = match target {
@@ -284,15 +284,15 @@ fn alias(
     Ok(())
 }
 
-fn print_aliases() -> LhResult<()> {
-    let config = config::load()?;
-    if config.alias.is_empty() {
-        println!("No aliases configured");
+fn print_aliases(cwd: &Path) -> LhResult<()> {
+    let aliases = config::aliases_for_dir(cwd)?;
+    if aliases.is_empty() {
+        println!("No aliases configured for current directory");
         println!("config {}", config::config_path().display());
         return Ok(());
     }
 
-    for (source, target) in config.alias {
+    for (source, target) in aliases {
         println!("{source} -> {target}");
     }
     Ok(())

@@ -73,6 +73,11 @@ pub fn all_alias_dirs() -> LhResult<Vec<PathBuf>> {
     Ok(all_alias_dirs_from_config(&config))
 }
 
+pub fn aliases_for_dir(cwd: &Path) -> LhResult<Vec<(String, String)>> {
+    let config = load()?;
+    Ok(aliases_for_dir_from_config(&config, cwd))
+}
+
 pub fn normalize_dir(base: &Path, path: &Path) -> LhResult<PathBuf> {
     let expanded = expand_home_path(path);
     let absolute = if expanded.is_absolute() {
@@ -129,6 +134,26 @@ fn all_alias_dirs_from_config(config: &Config) -> Vec<PathBuf> {
         dirs.insert(target);
     }
     dirs.into_iter().collect()
+}
+
+fn aliases_for_dir_from_config(config: &Config, cwd: &Path) -> Vec<(String, String)> {
+    let group = alias_group_from_config(config, cwd)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if group.len() <= 1 {
+        return Vec::new();
+    }
+
+    config
+        .alias
+        .iter()
+        .filter_map(|(source, target)| {
+            let source_path = canonicalize_existing(&expand_home(source));
+            let target_path = canonicalize_existing(&expand_home(target));
+            (group.contains(&source_path) || group.contains(&target_path))
+                .then(|| (source.clone(), target.clone()))
+        })
+        .collect()
 }
 
 fn remove_alias_from_config(config: &mut Config, dir: &Path) -> Vec<(String, String)> {
@@ -216,6 +241,56 @@ mod tests {
         assert!(group.contains(&one));
         assert!(group.contains(&two));
         assert!(group.contains(&three));
+    }
+
+    #[test]
+    fn aliases_for_dir_only_returns_connected_edges() {
+        let root = temp_dir("aliases-for-dir");
+        let one = root.join("one");
+        let two = root.join("two");
+        let three = root.join("three");
+        let unrelated = root.join("unrelated");
+        let other = root.join("other");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        fs::create_dir_all(&three).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::create_dir_all(&other).unwrap();
+
+        let config = Config {
+            alias: BTreeMap::from([
+                (one.display().to_string(), two.display().to_string()),
+                (three.display().to_string(), two.display().to_string()),
+                (unrelated.display().to_string(), other.display().to_string()),
+            ]),
+        };
+
+        let aliases = aliases_for_dir_from_config(&config, &one);
+
+        assert_eq!(
+            aliases,
+            vec![
+                (one.display().to_string(), two.display().to_string()),
+                (three.display().to_string(), two.display().to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn aliases_for_dir_returns_empty_for_unaliased_dir() {
+        let root = temp_dir("aliases-for-unaliased-dir");
+        let one = root.join("one");
+        let two = root.join("two");
+        let unrelated = root.join("unrelated");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+
+        let config = Config {
+            alias: BTreeMap::from([(one.display().to_string(), two.display().to_string())]),
+        };
+
+        assert!(aliases_for_dir_from_config(&config, &unrelated).is_empty());
     }
 
     #[test]
