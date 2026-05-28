@@ -198,6 +198,9 @@ pub trait AgentProvider {
     fn rename_thread(&self, _thread: &ThreadSummary, _name: &str) -> LhResult<()> {
         Err(format!("{} does not support native rename", self.kind()).into())
     }
+    fn unset_thread_name(&self, _thread: &ThreadSummary) -> LhResult<()> {
+        Err(format!("{} does not support native rename unset", self.kind()).into())
+    }
     fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
         let path = thread
             .source_path

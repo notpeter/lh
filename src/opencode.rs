@@ -89,6 +89,18 @@ impl AgentProvider for OpenCodeProvider {
         Ok(())
     }
 
+    fn unset_thread_name(&self, thread: &ThreadSummary) -> LhResult<()> {
+        let conn = Connection::open(self.db_path())?;
+        let changed = conn.execute(
+            "update session set title = '' where id = ?1",
+            params![thread.id],
+        )?;
+        if changed == 0 {
+            return Err(format!("OpenCode session not found: {}", thread.id).into());
+        }
+        Ok(())
+    }
+
     fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
         let conn = Connection::open_with_flags(self.db_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Ok(text_parts(&conn, &thread.id)?.join("\n\n"))
@@ -301,6 +313,40 @@ mod tests {
 
         let renamed = provider.list_threads(&cwd).unwrap().remove(0);
         assert_eq!(renamed.name.as_deref(), Some("New"));
+    }
+
+    #[test]
+    fn unsets_opencode_thread_name() {
+        let root = temp_dir("opencode-unset");
+        let cwd = root.join("work");
+        let db_dir = root.join(".local/share/opencode");
+        fs::create_dir_all(&db_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let conn = Connection::open(db_dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "create table project (id text primary key, worktree text not null);
+             create table session (id text primary key, project_id text not null, slug text not null, title text not null, directory text not null, time_created integer not null, time_updated integer not null);
+             create table message (id text primary key, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);
+             create table part (id text primary key, message_id text not null, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into project values ('p', ?1)",
+            params![cwd.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into session values ('s', 'p', 'slug', 'Old', ?1, 1000, 2000)",
+            params![cwd.to_string_lossy()],
+        )
+        .unwrap();
+        let provider = OpenCodeProvider::with_home(root);
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.unset_thread_name(&thread).unwrap();
+
+        let renamed = provider.list_threads(&cwd).unwrap().remove(0);
+        assert_eq!(renamed.name.as_deref(), Some("slug"));
     }
 
     #[test]

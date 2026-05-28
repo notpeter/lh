@@ -13,7 +13,8 @@ use crate::common::{
     default_executable,
 };
 use crate::util::{
-    canonicalize_existing, first_json_text, format_time, home_dir, parse_time, path_is_at_or_under,
+    canonicalize_existing, first_json_text, format_time, home_dir, is_noise_preview_text,
+    parse_time, path_is_at_or_under,
 };
 
 pub struct ClaudeProvider {
@@ -139,7 +140,38 @@ impl AgentProvider for ClaudeProvider {
                 "timestamp": timestamp,
             })
         )?;
-        update_session_name(&self.sessions_dir(), &thread.id, name)?;
+        set_session_name(&self.sessions_dir(), &thread.id, Some(name))?;
+        Ok(())
+    }
+
+    fn unset_thread_name(&self, thread: &ThreadSummary) -> LhResult<()> {
+        let path = thread
+            .source_path
+            .as_ref()
+            .ok_or("Claude thread is missing its transcript path")?;
+        let timestamp = format_time(OffsetDateTime::now_utc());
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "custom-title",
+                "customTitle": "",
+                "sessionId": thread.id,
+                "timestamp": timestamp,
+            })
+        )?;
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "agent-name",
+                "agentName": "",
+                "sessionId": thread.id,
+                "timestamp": timestamp,
+            })
+        )?;
+        set_session_name(&self.sessions_dir(), &thread.id, None)?;
         Ok(())
     }
 
@@ -234,7 +266,8 @@ fn parse_claude_jsonl(
             preview = value
                 .get("message")
                 .and_then(|message| message.get("content"))
-                .and_then(first_json_text);
+                .and_then(first_json_text)
+                .filter(|text| !is_noise_preview_text(text));
         }
 
         match value.get("type").and_then(|value| value.as_str()) {
@@ -322,7 +355,7 @@ fn read_session_names(sessions_dir: &Path) -> HashMap<String, String> {
     names
 }
 
-fn update_session_name(sessions_dir: &Path, session_id: &str, name: &str) -> LhResult<()> {
+fn set_session_name(sessions_dir: &Path, session_id: &str, name: Option<&str>) -> LhResult<()> {
     let Ok(entries) = fs::read_dir(sessions_dir) else {
         return Ok(());
     };
@@ -341,7 +374,11 @@ fn update_session_name(sessions_dir: &Path, session_id: &str, name: &str) -> LhR
         if value.get("sessionId").and_then(|value| value.as_str()) != Some(session_id) {
             continue;
         }
-        value["name"] = Value::String(name.to_string());
+        if let Some(name) = name {
+            value["name"] = Value::String(name.to_string());
+        } else if let Some(object) = value.as_object_mut() {
+            object.remove("name");
+        }
         fs::write(path, serde_json::to_string_pretty(&value)?)?;
     }
     Ok(())
@@ -454,6 +491,29 @@ mod tests {
     }
 
     #[test]
+    fn skips_injected_claude_setup_when_building_preview() {
+        let root = temp_dir("claude-preview-noise");
+        let cwd = root.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        let provider = ClaudeProvider::with_home(root);
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"# AGENTS.md instructions for /tmp/project\\n\\n<INSTRUCTIONS>details</INSTRUCTIONS>\"}}}}\n{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:01:00Z\",\"message\":{{\"content\":\"real claude request\"}}}}\n",
+                cwd.display(),
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let threads = provider.list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].preview.as_deref(), Some("real claude request"));
+    }
+
+    #[test]
     fn parses_claude_custom_title_from_transcript() {
         let root = temp_dir("claude-custom-title");
         let cwd = root.join("work");
@@ -506,6 +566,38 @@ mod tests {
         assert_eq!(renamed.name.as_deref(), Some("new-name"));
         let session = fs::read_to_string(root.join(".claude/sessions/active.json")).unwrap();
         assert!(session.contains("\"name\": \"new-name\""));
+    }
+
+    #[test]
+    fn unsets_claude_thread_name() {
+        let root = temp_dir("claude-unset");
+        let cwd = root.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(root.join(".claude/sessions")).unwrap();
+        fs::write(
+            root.join(".claude/sessions/active.json"),
+            "{\"sessionId\":\"abc\",\"name\":\"old-name\"}\n",
+        )
+        .unwrap();
+        let provider = ClaudeProvider::with_home(root.clone());
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello claude\"}}}}\n{{\"type\":\"custom-title\",\"customTitle\":\"old-name\",\"sessionId\":\"abc\"}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+        provider.unset_thread_name(&thread).unwrap();
+
+        let renamed = provider.list_threads(&cwd).unwrap().remove(0);
+        assert_eq!(renamed.name, None);
+        let session = fs::read_to_string(root.join(".claude/sessions/active.json")).unwrap();
+        assert!(!session.contains("\"name\""));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::common::{
 };
 use crate::util::{
     canonicalize_existing, collect_files_with_name_prefix, first_json_text, format_time, home_dir,
-    parse_time, path_is_at_or_under,
+    is_noise_preview_text, parse_time, path_is_at_or_under,
 };
 
 pub struct CodexProvider {
@@ -100,6 +100,24 @@ impl AgentProvider for CodexProvider {
         Ok(())
     }
 
+    fn unset_thread_name(&self, thread: &ThreadSummary) -> LhResult<()> {
+        let path = self.index_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "id": thread.id,
+                "thread_name": null,
+                "updated_at": format_time(OffsetDateTime::now_utc()),
+            })
+        )?;
+        Ok(())
+    }
+
     fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
         let path = thread
             .source_path
@@ -135,14 +153,16 @@ fn read_session_index(path: &Path) -> std::collections::HashMap<String, String> 
         let Some(id) = value.get("id").and_then(|value| value.as_str()) else {
             continue;
         };
-        let Some(name) = value
-            .get("thread_name")
-            .or_else(|| value.get("name"))
-            .and_then(|value| value.as_str())
-        else {
-            continue;
-        };
-        names.insert(id.to_string(), name.to_string());
+        if let Some(name) = value.get("thread_name").or_else(|| value.get("name")) {
+            match name.as_str().map(str::trim).filter(|name| !name.is_empty()) {
+                Some(name) => {
+                    names.insert(id.to_string(), name.to_string());
+                }
+                None => {
+                    names.remove(id);
+                }
+            }
+        }
     }
     names
 }
@@ -234,7 +254,7 @@ fn codex_user_text(value: &Value) -> Option<String> {
             payload
                 .get("content")
                 .and_then(first_json_text)
-                .and_then(|text| (!is_noise_user_text(&text)).then_some(text))
+                .and_then(|text| (!is_noise_preview_text(&text)).then_some(text))
         }
         Some("event_msg") => {
             let payload = value.get("payload")?;
@@ -244,7 +264,7 @@ fn codex_user_text(value: &Value) -> Option<String> {
             payload
                 .get("message")
                 .and_then(|message| message.as_str())
-                .filter(|text| !is_noise_user_text(text))
+                .filter(|text| !is_noise_preview_text(text))
                 .map(ToString::to_string)
         }
         _ => None,
@@ -281,13 +301,6 @@ fn codex_thread_content(path: &Path) -> LhResult<String> {
     Ok(out.join("\n\n"))
 }
 
-fn is_noise_user_text(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.starts_with("<environment_context>")
-        || trimmed.starts_with("<user_info>")
-        || trimmed.starts_with("<system_context>")
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -322,6 +335,27 @@ mod tests {
     }
 
     #[test]
+    fn skips_injected_codex_setup_when_building_preview() {
+        let root = temp_dir("codex-preview-noise");
+        let cwd = root.join("work");
+        fs::create_dir_all(root.join(".codex/sessions/2026/05/27")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            root.join(".codex/sessions/2026/05/27/rollout-test.jsonl"),
+            format!(
+                "{{\"timestamp\":\"2026-05-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"abc\",\"cwd\":\"{}\"}}}}\n{{\"timestamp\":\"2026-05-01T00:01:00Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/project\\n\\n<INSTRUCTIONS>details</INSTRUCTIONS>\"}}]}}}}\n{{\"timestamp\":\"2026-05-01T00:02:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"real user request\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let threads = CodexProvider::with_home(root).list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].name, None);
+        assert_eq!(threads[0].preview.as_deref(), Some("real user request"));
+    }
+
+    #[test]
     fn renames_codex_thread() {
         let root = temp_dir("codex-rename");
         let cwd = root.join("work");
@@ -342,6 +376,34 @@ mod tests {
 
         let renamed = provider.list_threads(&cwd).unwrap().remove(0);
         assert_eq!(renamed.name.as_deref(), Some("new-codex-name"));
+    }
+
+    #[test]
+    fn unsets_codex_thread_name() {
+        let root = temp_dir("codex-unset");
+        let cwd = root.join("work");
+        fs::create_dir_all(root.join(".codex/sessions/2026/05/27")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            root.join(".codex/session_index.jsonl"),
+            "{\"id\":\"abc\",\"thread_name\":\"old-codex-name\",\"updated_at\":\"2026-05-01T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".codex/sessions/2026/05/27/rollout-test.jsonl"),
+            format!(
+                "{{\"timestamp\":\"2026-05-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"abc\",\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        let provider = CodexProvider::with_home(root);
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.unset_thread_name(&thread).unwrap();
+
+        let renamed = provider.list_threads(&cwd).unwrap().remove(0);
+        assert_eq!(renamed.name, None);
     }
 
     #[test]

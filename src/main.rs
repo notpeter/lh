@@ -65,6 +65,8 @@ enum Commands {
         new_name: Option<String>,
         #[arg(long, help = "Generate a title from the thread transcript")]
         auto: bool,
+        #[arg(long, help = "Clear the selected thread's native title")]
+        unset: bool,
         #[arg(
             short = 'n',
             long,
@@ -175,8 +177,9 @@ fn run() -> LhResult<()> {
             thread_id,
             new_name,
             auto,
+            unset,
             dry_run,
-        } => rename(&cwd, global, thread_id, new_name, auto, dry_run),
+        } => rename(&cwd, global, thread_id, new_name, auto, unset, dry_run),
         Commands::Info {
             global,
             agent_or_name,
@@ -313,16 +316,29 @@ fn rename(
     thread_id: String,
     new_name: Option<String>,
     auto: bool,
+    unset: bool,
     dry_run: bool,
 ) -> LhResult<()> {
-    if auto == new_name.is_some() {
-        return Err("provide exactly one of [newname] or --auto".into());
+    let rename_modes = usize::from(new_name.is_some()) + usize::from(auto) + usize::from(unset);
+    if rename_modes != 1 {
+        return Err("provide exactly one of [newname], --auto, or --unset".into());
     }
 
     let (provider, thread) = select_provider_thread(cwd, global, None, Some(&thread_id))?;
     let thread = thread.ok_or("no thread selected")?;
     if !provider.supports_rename() {
         return Err(format!("{} does not support native rename", thread.agent).into());
+    }
+
+    if unset {
+        if dry_run {
+            println!("would unset name for {} {}", thread.agent, thread.id);
+            return Ok(());
+        }
+
+        provider.unset_thread_name(&thread)?;
+        println!("unset name for {} {}", thread.agent, thread.id);
+        return Ok(());
     }
 
     let name = if auto {
