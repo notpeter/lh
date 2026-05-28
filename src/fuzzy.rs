@@ -54,12 +54,7 @@ pub fn select_thread<'a>(threads: &'a [ThreadSummary], query: Option<&str>) -> M
 }
 
 fn score_thread(thread: &ThreadSummary, query: &str) -> u32 {
-    let fields = [
-        Some(thread.id.as_str()),
-        thread.name.as_deref(),
-        thread.preview.as_deref(),
-        thread.source_path.as_ref().and_then(|path| path.to_str()),
-    ];
+    let fields = [Some(thread.id.as_str()), thread.name.as_deref()];
 
     fields
         .into_iter()
@@ -82,20 +77,7 @@ fn score_field(field: &str, query: &str) -> u32 {
     if field.contains(&query) {
         return 600 + query.len() as u32;
     }
-
-    let mut score = 0;
-    let mut last_index = 0usize;
-    for ch in query.chars() {
-        let Some(index) = field[last_index..].find(ch) else {
-            return 0;
-        };
-        score += 10;
-        if index == 0 {
-            score += 2;
-        }
-        last_index += index + ch.len_utf8();
-    }
-    score
+    0
 }
 
 #[cfg(test)]
@@ -136,6 +118,37 @@ mod tests {
         assert!(matches!(
             select_thread(&threads, Some("fix pars")),
             MatchResult::Ambiguous(_)
+        ));
+    }
+
+    #[test]
+    fn ignores_preview_and_source_path_matches() {
+        let threads = vec![ThreadSummary {
+            agent: AgentKind::Codex,
+            id: "abc123".to_string(),
+            name: None,
+            cwd: PathBuf::from("/tmp"),
+            created_at: None,
+            updated_at: None,
+            source_path: Some(PathBuf::from("/tmp/contains-query.jsonl")),
+            preview: Some("contains query".to_string()),
+            removable: None,
+            resume_hint: None,
+        }];
+
+        assert!(matches!(
+            select_thread(&threads, Some("contains")),
+            MatchResult::None
+        ));
+    }
+
+    #[test]
+    fn ignores_subsequence_matches() {
+        let threads = vec![thread("abc123", "rapid triage")];
+
+        assert!(matches!(
+            select_thread(&threads, Some("rpt")),
+            MatchResult::None
         ));
     }
 }

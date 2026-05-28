@@ -516,6 +516,29 @@ mod tests {
     }
 
     #[test]
+    fn skips_claude_local_command_wrappers_when_building_preview() {
+        let root = temp_dir("claude-preview-command-wrapper");
+        let cwd = root.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        let provider = ClaudeProvider::with_home(root);
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"<command-name>/exit</command-name>\\n            <command-message>exit</command-message>\\n            <command-args></command-args>\"}}}}\n{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:01:00Z\",\"message\":{{\"content\":\"<local-command-stdout>Goodbye!</local-command-stdout>\"}}}}\n",
+                cwd.display(),
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let threads = provider.list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].preview, None);
+    }
+
+    #[test]
     fn parses_claude_custom_title_from_transcript() {
         let root = temp_dir("claude-custom-title");
         let cwd = root.join("work");

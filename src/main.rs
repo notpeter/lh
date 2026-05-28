@@ -111,6 +111,8 @@ enum Commands {
     #[command(about = "Remove a selected thread from native history")]
     #[command(alias = "rm", arg_required_else_help = true)]
     Remove {
+        #[arg(short = 'g', long = "global", help = "Search all known agent history")]
+        global: bool,
         #[arg(value_name = "TARGET", help = "Thread name/id to remove")]
         target: String,
         #[arg(
@@ -199,11 +201,12 @@ fn run() -> LhResult<()> {
         Commands::Unalias { dir } => unalias(&cwd, dir),
         Commands::Cd { dir } => cd(&cwd, dir),
         Commands::Remove {
+            global,
             target,
             name,
             force,
             dry_run,
-        } => remove(&cwd, target, name, force, dry_run),
+        } => remove(&cwd, global, target, name, force, dry_run),
         Commands::Agent {
             command: AgentsCommand::List,
         } => agents_list(&cwd),
@@ -307,7 +310,7 @@ fn is_global_arg(arg: &OsString) -> bool {
 }
 
 fn global_flag_subcommand(arg: &str) -> bool {
-    matches!(arg, "list" | "ls" | "rename" | "info")
+    matches!(arg, "list" | "ls" | "rename" | "info" | "remove" | "rm")
 }
 
 fn is_numeric_limit_arg(arg: &OsString) -> bool {
@@ -497,13 +500,14 @@ fn cd(cwd: &Path, query: Option<String>) -> LhResult<()> {
 
 fn remove(
     cwd: &Path,
+    global: bool,
     target: String,
     name: Option<String>,
     force: bool,
     dry_run: bool,
 ) -> LhResult<()> {
     let (agent, query) = parse_remove_selector(target, name)?;
-    let (_provider, thread) = select_provider_thread(cwd, false, agent, Some(&query))?;
+    let (_provider, thread) = select_provider_thread(cwd, global, agent, Some(&query))?;
     let thread = thread.ok_or("no thread selected")?;
     let target = thread
         .removable
@@ -789,7 +793,7 @@ fn thread_list_name(thread: &ThreadSummary) -> String {
         .name
         .clone()
         .or_else(|| thread.preview.clone())
-        .unwrap_or_else(|| thread.id.clone())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1123,6 +1127,14 @@ mod tests {
     }
 
     #[test]
+    fn moves_global_flag_in_front_of_remove() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-g", "rm", "abc123", "--dry-run"])),
+            strings(&["lh", "rm", "-g", "abc123", "--dry-run"])
+        );
+    }
+
+    #[test]
     fn rename_defaults_to_auto_when_name_is_omitted() {
         assert_eq!(
             parse_rename_mode(None, false, false).unwrap(),
@@ -1267,6 +1279,20 @@ mod tests {
     }
 
     #[test]
+    fn remove_parses_global_flag() {
+        let cli = Cli::try_parse_from(strings(&["lh", "rm", "-g", "abc123"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Remove {
+                global: true,
+                target,
+                ..
+            }) if target == "abc123"
+        ));
+    }
+
+    #[test]
     fn ambiguous_error_aligns_candidate_columns() {
         let opencode = ThreadSummary {
             agent: AgentKind::OpenCode,
@@ -1373,6 +1399,24 @@ mod tests {
         };
 
         assert_eq!(thread_list_name(&thread), preview);
+    }
+
+    #[test]
+    fn list_name_uses_dash_when_thread_has_no_name_or_preview() {
+        let thread = ThreadSummary {
+            agent: AgentKind::Claude,
+            id: "abc123".to_string(),
+            name: None,
+            cwd: PathBuf::from("/tmp"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+
+        assert_eq!(thread_list_name(&thread), "-");
     }
 
     #[test]

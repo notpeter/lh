@@ -186,8 +186,10 @@ pub fn first_json_text(value: &serde_json::Value) -> Option<String> {
 pub fn is_noise_preview_text(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with("# AGENTS.md instructions for ")
+        || trimmed.starts_with("<command-name>")
         || trimmed.starts_with("<environment_context>")
         || trimmed.starts_with("<local-command-caveat>")
+        || trimmed.starts_with("<local-command-stdout>")
         || trimmed.starts_with("<system_context>")
         || trimmed.starts_with("<user_info>")
 }
