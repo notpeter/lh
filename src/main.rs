@@ -758,16 +758,6 @@ fn print_threads(threads: &[ThreadSummary]) {
     const UPDATED_WIDTH: usize = 19;
 
     let widths = list_column_widths(threads, terminal_width());
-    println!(
-        "{:<UPDATED_WIDTH$} {:<agent_width$} {:<id_width$} {:<dir_width$} NAME",
-        "UPDATED",
-        "AGENT",
-        "ID",
-        "DIR",
-        agent_width = widths.agent,
-        id_width = widths.id,
-        dir_width = widths.dir,
-    );
     for thread in threads {
         let updated = thread
             .updated_at
@@ -810,19 +800,13 @@ fn list_column_widths(threads: &[ThreadSummary], terminal_width: usize) -> ListC
     const DIR_MAX_WIDTH: usize = 30;
 
     let agent = bounded_column_width(
-        "AGENT",
         threads
             .iter()
             .map(|thread| thread.agent.as_str().to_string()),
         AGENT_MAX_WIDTH,
     );
-    let id = bounded_column_width(
-        "ID",
-        threads.iter().map(|thread| thread.id.clone()),
-        ID_MAX_WIDTH,
-    );
+    let id = bounded_column_width(threads.iter().map(|thread| thread.id.clone()), ID_MAX_WIDTH);
     let dir = bounded_column_width(
-        "DIR",
         threads.iter().map(|thread| shorten_path(&thread.cwd)),
         DIR_MAX_WIDTH,
     );
@@ -836,15 +820,10 @@ fn list_column_widths(threads: &[ThreadSummary], terminal_width: usize) -> ListC
     }
 }
 
-fn bounded_column_width(
-    header: &str,
-    values: impl IntoIterator<Item = String>,
-    max_width: usize,
-) -> usize {
+fn bounded_column_width(values: impl IntoIterator<Item = String>, max_width: usize) -> usize {
     values
         .into_iter()
         .map(|value| value.chars().count())
-        .chain(std::iter::once(header.chars().count()))
         .max()
         .unwrap_or(1)
         .min(max_width)
