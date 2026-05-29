@@ -13,7 +13,6 @@ lh ls
 lh ls -g
 lh ls -g -5
 lh ls -g -10
-lh ls -g --all
 lh info [agent] [name-or-id]
 lh info -g [agent] [name-or-id]
 lh alias [target]
@@ -43,8 +42,10 @@ from their native stores; the SQLite database is an explicit cache under the
 platform data directory.
 
 `lh ls` is scoped to the current directory. `lh ls -g` scans all known agent
-history and shows the 10 most recent rows by default. Use `-5`, `-10`, or any
-other numeric shorthand to change the row count; use `--all` for no limit.
+history. List output is unlimited by default and uses `$PAGER` or `less` when
+stdout is a terminal, with Git-style `LESS=FRX` defaults when `LESS` is unset;
+when stdout is piped, it prints directly. Use `-5`, `-10`, or any other numeric
+shorthand to limit the row count.
 `lh info` prints full details for a selected thread, including its source path.
 `lh rename` updates the native agent title for providers with known writable
 title storage. `lh rename [thread-id] --auto` uses the optional `[llm]` config:

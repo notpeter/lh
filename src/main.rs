@@ -12,9 +12,9 @@ mod util;
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use clap::{Parser, Subcommand};
 
@@ -36,8 +36,6 @@ enum Commands {
     List {
         #[arg(short = 'g', long = "global", help = "Scan all known agent history")]
         global: bool,
-        #[arg(long, help = "Show all matching threads without the default limit")]
-        all: bool,
         #[arg(long, value_name = "N", help = "Limit the number of rows shown")]
         limit: Option<usize>,
     },
@@ -170,10 +168,9 @@ fn run() -> LhResult<()> {
 
     match cli.command.unwrap_or(Commands::List {
         global: false,
-        all: false,
         limit: None,
     }) {
-        Commands::List { global, all, limit } => list(&cwd, global, all, limit),
+        Commands::List { global, limit } => list(&cwd, global, limit),
         Commands::New { agent, name } => new_thread(&cwd, agent, name),
         Commands::Resume {
             agent_or_name,
@@ -230,19 +227,14 @@ fn run() -> LhResult<()> {
     }
 }
 
-fn list(cwd: &Path, global: bool, all: bool, limit: Option<usize>) -> LhResult<()> {
+fn list(cwd: &Path, global: bool, limit: Option<usize>) -> LhResult<()> {
     let mut threads = if global {
         providers::list_global()?
     } else {
         let dirs = config::alias_group(cwd)?;
         providers::list_all_for_dirs(&dirs)?
     };
-    let effective_limit = if all {
-        None
-    } else {
-        limit.or(global.then_some(10))
-    };
-    if let Some(limit) = effective_limit {
+    if let Some(limit) = limit {
         threads.truncate(limit);
     }
 
@@ -254,7 +246,7 @@ fn list(cwd: &Path, global: bool, all: bool, limit: Option<usize>) -> LhResult<(
         }
         return Ok(());
     }
-    print_threads(&threads);
+    page_or_print(&format_threads(&threads))?;
     Ok(())
 }
 
@@ -301,7 +293,7 @@ fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
 
 fn is_list_shortcut_arg(arg: &OsString) -> bool {
     let value = arg.to_string_lossy();
-    is_global_arg(arg) || matches!(value.as_ref(), "--all" | "--limit")
+    is_global_arg(arg) || value == "--limit"
 }
 
 fn is_global_arg(arg: &OsString) -> bool {
@@ -754,9 +746,10 @@ fn ambiguous_error(candidates: Vec<&ThreadSummary>) -> String {
     out
 }
 
-fn print_threads(threads: &[ThreadSummary]) {
+fn format_threads(threads: &[ThreadSummary]) -> String {
     const UPDATED_WIDTH: usize = 19;
 
+    let mut out = String::new();
     let widths = list_column_widths(threads, terminal_width());
     for thread in threads {
         let updated = thread
@@ -764,7 +757,7 @@ fn print_threads(threads: &[ThreadSummary]) {
             .or(thread.created_at)
             .map(format_display_time)
             .unwrap_or_else(|| "-".to_string());
-        println!(
+        out.push_str(&format!(
             "{:<UPDATED_WIDTH$} {:<agent_width$} {:<id_width$} {:<dir_width$} {}",
             updated,
             thread.agent.as_str(),
@@ -774,8 +767,56 @@ fn print_threads(threads: &[ThreadSummary]) {
             agent_width = widths.agent,
             id_width = widths.id,
             dir_width = widths.dir,
-        );
+        ));
+        out.push('\n');
     }
+    out
+}
+
+fn page_or_print(output: &str) -> LhResult<()> {
+    if !io::stdout().is_terminal() {
+        print!("{output}");
+        return Ok(());
+    }
+
+    let mut child = pager_command()?.stdin(Stdio::piped()).spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(output.as_bytes())?;
+    }
+
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("pager exited with {status}").into())
+    }
+}
+
+fn pager_command() -> LhResult<Command> {
+    let mut command =
+        if let Some(pager) = std::env::var_os("PAGER").filter(|value| !value.is_empty()) {
+            #[cfg(unix)]
+            {
+                let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+                let mut command = Command::new(shell);
+                command.arg("-c").arg(pager);
+                command
+            }
+
+            #[cfg(not(unix))]
+            {
+                Command::new(pager)
+            }
+        } else {
+            Command::new("less")
+        };
+
+    if std::env::var_os("LESS").is_none() {
+        command.env("LESS", "FRX");
+    }
+
+    Ok(command)
 }
 
 fn thread_list_name(thread: &ThreadSummary) -> String {
