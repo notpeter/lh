@@ -69,6 +69,8 @@ enum Commands {
         auto: bool,
         #[arg(long, value_name = "PROVIDER", help = "Override [llm].provider")]
         provider: Option<String>,
+        #[arg(long, value_name = "MODEL", help = "Override [llm].model")]
+        model: Option<String>,
         #[arg(long, value_name = "PROMPT", help = "Override [llm].prompt")]
         prompt: Option<String>,
         #[arg(long, help = "Clear the selected thread's native title")]
@@ -187,6 +189,7 @@ fn run() -> LhResult<()> {
             new_name,
             auto,
             provider,
+            model,
             prompt,
             unset,
             dry_run,
@@ -198,6 +201,7 @@ fn run() -> LhResult<()> {
                 new_name,
                 auto,
                 llm_provider: provider,
+                llm_model: model,
                 llm_prompt: prompt,
                 unset,
                 dry_run,
@@ -357,6 +361,7 @@ struct RenameRequest {
     thread_id: String,
     auto: bool,
     llm_provider: Option<String>,
+    llm_model: Option<String>,
     llm_prompt: Option<String>,
     unset: bool,
     dry_run: bool,
@@ -386,8 +391,12 @@ fn rename(cwd: &Path, request: RenameRequest) -> LhResult<()> {
         }
         RenameMode::Manual(name) => name,
         RenameMode::Auto => {
-            let config =
-                rename_llm_config(config::load()?, request.llm_provider, request.llm_prompt)?;
+            let config = rename_llm_config(
+                config::load()?,
+                request.llm_provider,
+                request.llm_model,
+                request.llm_prompt,
+            )?;
             if config.llm.is_none() {
                 return Err(
                     "provide a new name to rename this thread (or for auto rename configure an llm provider, or pass both --provider and --prompt)"
@@ -418,9 +427,10 @@ fn rename(cwd: &Path, request: RenameRequest) -> LhResult<()> {
 fn rename_llm_config(
     mut config: config::Config,
     provider: Option<String>,
+    model: Option<String>,
     prompt: Option<String>,
 ) -> LhResult<config::Config> {
-    if provider.is_none() && prompt.is_none() {
+    if provider.is_none() && model.is_none() && prompt.is_none() {
         return Ok(config);
     }
 
@@ -428,6 +438,9 @@ fn rename_llm_config(
         Some(mut llm) => {
             if let Some(provider) = provider {
                 llm.provider = provider;
+            }
+            if let Some(model) = model {
+                llm.model = Some(model);
             }
             if let Some(prompt) = prompt {
                 llm.prompt = prompt;
@@ -439,7 +452,7 @@ fn rename_llm_config(
                 .ok_or("auto rename with no [llm] config requires both --provider and --prompt")?,
             prompt: prompt
                 .ok_or("auto rename with no [llm] config requires both --provider and --prompt")?,
-            model: None,
+            model,
         },
     });
 
@@ -1281,12 +1294,13 @@ mod tests {
         let merged = rename_llm_config(
             config,
             Some("gemini".to_string()),
+            Some("gemini-3.1-flash-lite".to_string()),
             Some("override prompt".to_string()),
         )
         .unwrap();
         let llm = merged.llm.unwrap();
         assert_eq!(llm.provider, "gemini");
-        assert_eq!(llm.model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(llm.model.as_deref(), Some("gemini-3.1-flash-lite"));
         assert_eq!(llm.prompt, "override prompt");
     }
 
@@ -1295,19 +1309,25 @@ mod tests {
         let merged = rename_llm_config(
             config::Config::default(),
             Some("openai".to_string()),
+            Some("gpt-5.4-nano".to_string()),
             Some("name this thread".to_string()),
         )
         .unwrap();
         let llm = merged.llm.unwrap();
         assert_eq!(llm.provider, "openai");
-        assert_eq!(llm.model, None);
+        assert_eq!(llm.model.as_deref(), Some("gpt-5.4-nano"));
         assert_eq!(llm.prompt, "name this thread");
     }
 
     #[test]
     fn rename_llm_overrides_require_provider_and_prompt_without_config() {
-        let error = rename_llm_config(config::Config::default(), Some("openai".to_string()), None)
-            .unwrap_err();
+        let error = rename_llm_config(
+            config::Config::default(),
+            Some("openai".to_string()),
+            Some("gpt-5.4-nano".to_string()),
+            None,
+        )
+        .unwrap_err();
 
         assert_eq!(
             error.to_string(),
