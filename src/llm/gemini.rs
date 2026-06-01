@@ -3,7 +3,9 @@ use serde_json::{Value, json};
 use crate::common::LhResult;
 use crate::config::LlmConfig;
 
-use super::{LlmProvider, api_error, curl_post_json, model_for, thread_content_for_request};
+use super::{
+    LlmProvider, TitleResponse, api_error, curl_post_json, model_for, thread_content_for_request,
+};
 
 const GEMINI_GENERATE_CONTENT_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/models";
@@ -11,6 +13,10 @@ const GEMINI_GENERATE_CONTENT_BASE_URL: &str =
 pub struct GeminiProvider;
 
 impl LlmProvider for GeminiProvider {
+    fn id(&self) -> &'static str {
+        "gemini"
+    }
+
     fn name(&self) -> &'static str {
         "Gemini"
     }
@@ -19,9 +25,10 @@ impl LlmProvider for GeminiProvider {
         "gemini-3.1-flash-lite"
     }
 
-    fn generate_title(&self, config: &LlmConfig, thread_content: &str) -> LhResult<String> {
+    fn generate_title(&self, config: &LlmConfig, thread_content: &str) -> LhResult<TitleResponse> {
         let api_key = std::env::var("GEMINI_API_KEY")
             .map_err(|_| "GEMINI_API_KEY must be set for provider = \"gemini\"")?;
+        let model = model_for(config, self);
         let body = json!({
             "system_instruction": {
                 "parts": [
@@ -47,8 +54,7 @@ impl LlmProvider for GeminiProvider {
         .to_string();
         let url = format!(
             "{}/{}:generateContent",
-            GEMINI_GENERATE_CONTENT_BASE_URL,
-            model_for(config, self)
+            GEMINI_GENERATE_CONTENT_BASE_URL, model
         );
 
         let response = curl_post_json(
@@ -57,11 +63,18 @@ impl LlmProvider for GeminiProvider {
             body,
             self.name(),
         )?;
-        let value = serde_json::from_str::<Value>(&response)?;
+        let value = serde_json::from_str::<Value>(&response.body)?;
         if let Some(error) = api_error(&value, self.name()) {
             return Err(error.into());
         }
-        extract_output_text(&value)
+        Ok(TitleResponse {
+            text: extract_output_text(&value)?,
+            provider: self.id().to_string(),
+            model,
+            prompt: config.prompt.clone(),
+            response_headers: response.headers,
+            response_body: value,
+        })
     }
 }
 

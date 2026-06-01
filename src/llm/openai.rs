@@ -3,13 +3,19 @@ use serde_json::{Value, json};
 use crate::common::LhResult;
 use crate::config::LlmConfig;
 
-use super::{LlmProvider, api_error, curl_post_json, model_for, thread_content_for_request};
+use super::{
+    LlmProvider, TitleResponse, api_error, curl_post_json, model_for, thread_content_for_request,
+};
 
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 
 pub struct OpenAiProvider;
 
 impl LlmProvider for OpenAiProvider {
+    fn id(&self) -> &'static str {
+        "openai"
+    }
+
     fn name(&self) -> &'static str {
         "OpenAI"
     }
@@ -18,11 +24,12 @@ impl LlmProvider for OpenAiProvider {
         "gpt-5.4-nano"
     }
 
-    fn generate_title(&self, config: &LlmConfig, thread_content: &str) -> LhResult<String> {
+    fn generate_title(&self, config: &LlmConfig, thread_content: &str) -> LhResult<TitleResponse> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| "OPENAI_API_KEY must be set for provider = \"openai\"")?;
+        let model = model_for(config, self);
         let body = json!({
-            "model": model_for(config, self),
+            "model": model,
             "instructions": config.prompt,
             "input": thread_content_for_request(thread_content),
             "max_output_tokens": 128,
@@ -36,11 +43,18 @@ impl LlmProvider for OpenAiProvider {
             body,
             self.name(),
         )?;
-        let value = serde_json::from_str::<Value>(&response)?;
+        let value = serde_json::from_str::<Value>(&response.body)?;
         if let Some(error) = api_error(&value, self.name()) {
             return Err(error.into());
         }
-        extract_output_text(&value)
+        Ok(TitleResponse {
+            text: extract_output_text(&value)?,
+            provider: self.id().to_string(),
+            model,
+            prompt: config.prompt.clone(),
+            response_headers: response.headers,
+            response_body: value,
+        })
     }
 }
 

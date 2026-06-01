@@ -7,6 +7,7 @@ mod fuzzy;
 mod gemini;
 mod llm;
 mod opencode;
+mod prices;
 mod providers;
 mod util;
 
@@ -66,6 +67,10 @@ enum Commands {
             help = "Generate a title from the thread transcript (default when NEW_NAME is omitted)"
         )]
         auto: bool,
+        #[arg(long, value_name = "PROVIDER", help = "Override [llm].provider")]
+        provider: Option<String>,
+        #[arg(long, value_name = "PROMPT", help = "Override [llm].prompt")]
+        prompt: Option<String>,
         #[arg(long, help = "Clear the selected thread's native title")]
         unset: bool,
         #[arg(
@@ -181,9 +186,23 @@ fn run() -> LhResult<()> {
             thread_id,
             new_name,
             auto,
+            provider,
+            prompt,
             unset,
             dry_run,
-        } => rename(&cwd, global, thread_id, new_name, auto, unset, dry_run),
+        } => rename(
+            &cwd,
+            RenameRequest {
+                global,
+                thread_id,
+                new_name,
+                auto,
+                llm_provider: provider,
+                llm_prompt: prompt,
+                unset,
+                dry_run,
+            },
+        ),
         Commands::Info {
             global,
             agent_or_name,
@@ -332,26 +351,31 @@ fn resume(cwd: &Path, agent_or_name: Option<String>, name: Option<String>) -> Lh
     command.exec()
 }
 
-fn rename(
-    cwd: &Path,
+struct RenameRequest {
     global: bool,
-    thread_id: String,
     new_name: Option<String>,
+    thread_id: String,
     auto: bool,
+    llm_provider: Option<String>,
+    llm_prompt: Option<String>,
     unset: bool,
     dry_run: bool,
-) -> LhResult<()> {
-    let mode = parse_rename_mode(new_name, auto, unset)?;
+}
 
-    let (provider, thread) = select_provider_thread(cwd, global, None, Some(&thread_id))?;
+fn rename(cwd: &Path, request: RenameRequest) -> LhResult<()> {
+    let mode = parse_rename_mode(request.new_name, request.auto, request.unset)?;
+
+    let (provider, thread) =
+        select_provider_thread(cwd, request.global, None, Some(&request.thread_id))?;
     let thread = thread.ok_or("no thread selected")?;
     if !provider.supports_rename() {
         return Err(format!("{} does not support native rename", thread.agent).into());
     }
 
+    let mut pricing = None;
     let name = match mode {
         RenameMode::Unset => {
-            if dry_run {
+            if request.dry_run {
                 println!("would unset name for {} {}", thread.agent, thread.id);
                 return Ok(());
             }
@@ -362,19 +386,26 @@ fn rename(
         }
         RenameMode::Manual(name) => name,
         RenameMode::Auto => {
-            let config = config::load()?;
+            let config =
+                rename_llm_config(config::load()?, request.llm_provider, request.llm_prompt)?;
             if config.llm.is_none() {
                 return Err(
-                    "provide a new name to rename this thread (or for auto rename configure an llm provider)"
+                    "provide a new name to rename this thread (or for auto rename configure an llm provider, or pass both --provider and --prompt)"
                         .into(),
                 );
             }
             let content = provider.thread_content(&thread)?;
-            llm::generate_thread_name(&config, &content)?
+            let generated = llm::generate_thread_name_for_rename(&config, &thread, &content)?;
+            pricing = generated.pricing;
+            generated.name
         }
     };
 
-    if dry_run {
+    if let Some(pricing) = &pricing {
+        print_rename_pricing(pricing);
+    }
+
+    if request.dry_run {
         println!("would rename {} {} to {}", thread.agent, thread.id, name);
         return Ok(());
     }
@@ -382,6 +413,54 @@ fn rename(
     provider.rename_thread(&thread, &name)?;
     println!("renamed {} {} to {}", thread.agent, thread.id, name);
     Ok(())
+}
+
+fn rename_llm_config(
+    mut config: config::Config,
+    provider: Option<String>,
+    prompt: Option<String>,
+) -> LhResult<config::Config> {
+    if provider.is_none() && prompt.is_none() {
+        return Ok(config);
+    }
+
+    config.llm = Some(match config.llm.take() {
+        Some(mut llm) => {
+            if let Some(provider) = provider {
+                llm.provider = provider;
+            }
+            if let Some(prompt) = prompt {
+                llm.prompt = prompt;
+            }
+            llm
+        }
+        None => config::LlmConfig {
+            provider: provider
+                .ok_or("auto rename with no [llm] config requires both --provider and --prompt")?,
+            prompt: prompt
+                .ok_or("auto rename with no [llm] config requires both --provider and --prompt")?,
+            model: None,
+        },
+    });
+
+    Ok(config)
+}
+
+fn print_rename_pricing(pricing: &prices::RequestCost) {
+    let token_text = match pricing.total_tokens {
+        Some(total) => format!(
+            "{} input, {} output, {} total tokens",
+            pricing.input_tokens, pricing.output_tokens, total
+        ),
+        None => format!(
+            "{} input, {} output tokens",
+            pricing.input_tokens, pricing.output_tokens
+        ),
+    };
+    eprintln!(
+        "rename llm cost: ${:.6} ({token_text}, {})",
+        pricing.total_cost_usd, pricing.model
+    );
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1185,6 +1264,54 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "provide at most one of [newname], --auto, or --unset"
+        );
+    }
+
+    #[test]
+    fn rename_llm_overrides_merge_with_config() {
+        let config = config::Config {
+            llm: Some(config::LlmConfig {
+                provider: "anthropic".to_string(),
+                model: Some("claude-haiku-4-5".to_string()),
+                prompt: "base prompt".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let merged = rename_llm_config(
+            config,
+            Some("gemini".to_string()),
+            Some("override prompt".to_string()),
+        )
+        .unwrap();
+        let llm = merged.llm.unwrap();
+        assert_eq!(llm.provider, "gemini");
+        assert_eq!(llm.model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(llm.prompt, "override prompt");
+    }
+
+    #[test]
+    fn rename_llm_overrides_can_supply_missing_config() {
+        let merged = rename_llm_config(
+            config::Config::default(),
+            Some("openai".to_string()),
+            Some("name this thread".to_string()),
+        )
+        .unwrap();
+        let llm = merged.llm.unwrap();
+        assert_eq!(llm.provider, "openai");
+        assert_eq!(llm.model, None);
+        assert_eq!(llm.prompt, "name this thread");
+    }
+
+    #[test]
+    fn rename_llm_overrides_require_provider_and_prompt_without_config() {
+        let error = rename_llm_config(config::Config::default(), Some("openai".to_string()), None)
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "auto rename with no [llm] config requires both --provider and --prompt"
         );
     }
 

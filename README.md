@@ -68,7 +68,6 @@ Supported providers and default models:
 | --- | --- | --- |
 | `openai` | `OPENAI_API_KEY` | `gpt-5.4-nano` |
 | `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5` |
-| `xai` | `XAI_API_KEY` | `grok-latest` |
 | `gemini` | `GEMINI_API_KEY` | `gemini-3.1-flash-lite` |
 
 `lh alias ../other-clone` records the current directory as an alias of another
