@@ -39,6 +39,15 @@ enum Commands {
         global: bool,
         #[arg(long, value_name = "N", help = "Limit the number of rows shown")]
         limit: Option<usize>,
+        #[arg(
+            short = 'o',
+            long = "output",
+            value_name = "FIELDS",
+            value_delimiter = ',',
+            num_args = 1..,
+            help = "Columns to show, comma-separated or repeated"
+        )]
+        output: Vec<String>,
     },
     #[command(about = "Start a new agent thread")]
     New {
@@ -176,8 +185,13 @@ fn run() -> LhResult<()> {
     match cli.command.unwrap_or(Commands::List {
         global: false,
         limit: None,
+        output: Vec::new(),
     }) {
-        Commands::List { global, limit } => list(&cwd, global, limit),
+        Commands::List {
+            global,
+            limit,
+            output,
+        } => list(&cwd, global, limit, output),
         Commands::New { agent, name } => new_thread(&cwd, agent, name),
         Commands::Resume {
             agent_or_name,
@@ -250,7 +264,8 @@ fn run() -> LhResult<()> {
     }
 }
 
-fn list(cwd: &Path, global: bool, limit: Option<usize>) -> LhResult<()> {
+fn list(cwd: &Path, global: bool, limit: Option<usize>, output: Vec<String>) -> LhResult<()> {
+    let columns = parse_list_columns(&output)?;
     let mut threads = if global {
         providers::list_global()?
     } else {
@@ -269,7 +284,7 @@ fn list(cwd: &Path, global: bool, limit: Option<usize>) -> LhResult<()> {
         }
         return Ok(());
     }
-    page_or_print(&format_threads(&threads))?;
+    page_or_print(&format_threads(&threads, &columns))?;
     Ok(())
 }
 
@@ -316,7 +331,7 @@ fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
 
 fn is_list_shortcut_arg(arg: &OsString) -> bool {
     let value = arg.to_string_lossy();
-    is_global_arg(arg) || value == "--limit"
+    is_global_arg(arg) || matches!(value.as_ref(), "--limit" | "-o" | "--output")
 }
 
 fn is_global_arg(arg: &OsString) -> bool {
@@ -838,28 +853,22 @@ fn ambiguous_error(candidates: Vec<&ThreadSummary>) -> String {
     out
 }
 
-fn format_threads(threads: &[ThreadSummary]) -> String {
-    const UPDATED_WIDTH: usize = 19;
-
+fn format_threads(threads: &[ThreadSummary], columns: &[ListColumn]) -> String {
     let mut out = String::new();
-    let widths = list_column_widths(threads, terminal_width());
+    let widths = list_column_widths_for_columns(threads, columns, terminal_width());
     for thread in threads {
-        let updated = thread
-            .updated_at
-            .or(thread.created_at)
-            .map(format_display_time)
-            .unwrap_or_else(|| "-".to_string());
-        out.push_str(&format!(
-            "{:<UPDATED_WIDTH$} {:<agent_width$} {:<id_width$} {:<dir_width$} {}",
-            updated,
-            thread.agent.as_str(),
-            common::truncate(&thread.id, widths.id),
-            common::truncate(&shorten_path(&thread.cwd), widths.dir),
-            common::truncate(&thread_list_name(thread), widths.name),
-            agent_width = widths.agent,
-            id_width = widths.id,
-            dir_width = widths.dir,
-        ));
+        for (index, (column, width)) in columns.iter().zip(widths.iter()).enumerate() {
+            if index > 0 {
+                out.push(' ');
+            }
+
+            let value = common::truncate(&column.value(thread), *width);
+            if index + 1 == columns.len() {
+                out.push_str(&value);
+            } else {
+                out.push_str(&format!("{value:<width$}", width = *width));
+            }
+        }
         out.push('\n');
     }
     out
@@ -919,6 +928,121 @@ fn thread_list_name(thread: &ThreadSummary) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListColumn {
+    Updated,
+    Created,
+    Agent,
+    Id,
+    Dir,
+    Name,
+    Preview,
+    Source,
+}
+
+impl ListColumn {
+    const DEFAULT: [Self; 5] = [Self::Updated, Self::Agent, Self::Id, Self::Dir, Self::Name];
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "updated" | "updated_at" => Some(Self::Updated),
+            "created" | "created_at" => Some(Self::Created),
+            "agent" => Some(Self::Agent),
+            "id" => Some(Self::Id),
+            "dir" | "cwd" => Some(Self::Dir),
+            "name" | "title" => Some(Self::Name),
+            "preview" => Some(Self::Preview),
+            "source" | "source_path" => Some(Self::Source),
+            _ => None,
+        }
+    }
+
+    fn value(self, thread: &ThreadSummary) -> String {
+        match self {
+            Self::Updated => thread
+                .updated_at
+                .or(thread.created_at)
+                .map(format_display_time)
+                .unwrap_or_else(|| "-".to_string()),
+            Self::Created => thread
+                .created_at
+                .map(format_display_time)
+                .unwrap_or_else(|| "-".to_string()),
+            Self::Agent => thread.agent.as_str().to_string(),
+            Self::Id => thread.id.clone(),
+            Self::Dir => shorten_path(&thread.cwd),
+            Self::Name => thread_list_name(thread),
+            Self::Preview => thread.preview.clone().unwrap_or_else(|| "-".to_string()),
+            Self::Source => thread
+                .source_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        }
+    }
+
+    fn non_last_width(self, threads: &[ThreadSummary]) -> usize {
+        match self {
+            Self::Updated | Self::Created => 19,
+            Self::Agent => bounded_column_width(
+                threads
+                    .iter()
+                    .map(|thread| thread.agent.as_str().to_string()),
+                10,
+            ),
+            Self::Id => bounded_column_width(threads.iter().map(|thread| thread.id.clone()), 36),
+            Self::Dir => {
+                bounded_column_width(threads.iter().map(|thread| shorten_path(&thread.cwd)), 30)
+            }
+            Self::Name => bounded_column_width(threads.iter().map(thread_list_name), 60),
+            Self::Preview => bounded_column_width(
+                threads
+                    .iter()
+                    .map(|thread| thread.preview.clone().unwrap_or_else(|| "-".to_string())),
+                60,
+            ),
+            Self::Source => bounded_column_width(
+                threads.iter().map(|thread| {
+                    thread
+                        .source_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                }),
+                60,
+            ),
+        }
+    }
+}
+
+fn parse_list_columns(values: &[String]) -> LhResult<Vec<ListColumn>> {
+    if values.is_empty() {
+        return Ok(ListColumn::DEFAULT.to_vec());
+    }
+
+    let mut columns = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let Some(column) = ListColumn::parse(value) else {
+            return Err(format!(
+                "unknown list column '{value}'; expected one of updated, created, agent, id, dir, cwd, name, preview, source"
+            )
+            .into());
+        };
+        columns.push(column);
+    }
+
+    if columns.is_empty() {
+        return Err("no list columns specified".into());
+    }
+
+    Ok(columns)
+}
+
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 struct ListColumnWidths {
     agent: usize,
@@ -927,23 +1051,13 @@ struct ListColumnWidths {
     name: usize,
 }
 
+#[cfg(test)]
 fn list_column_widths(threads: &[ThreadSummary], terminal_width: usize) -> ListColumnWidths {
-    const AGENT_MAX_WIDTH: usize = 10;
-    const ID_MAX_WIDTH: usize = 36;
-    const DIR_MAX_WIDTH: usize = 30;
-
-    let agent = bounded_column_width(
-        threads
-            .iter()
-            .map(|thread| thread.agent.as_str().to_string()),
-        AGENT_MAX_WIDTH,
-    );
-    let id = bounded_column_width(threads.iter().map(|thread| thread.id.clone()), ID_MAX_WIDTH);
-    let dir = bounded_column_width(
-        threads.iter().map(|thread| shorten_path(&thread.cwd)),
-        DIR_MAX_WIDTH,
-    );
-    let name = list_name_width_for_columns(terminal_width, agent, id, dir);
+    let widths = list_column_widths_for_columns(threads, &ListColumn::DEFAULT, terminal_width);
+    let agent = widths[1];
+    let id = widths[2];
+    let dir = widths[3];
+    let name = widths[4];
 
     ListColumnWidths {
         agent,
@@ -951,6 +1065,30 @@ fn list_column_widths(threads: &[ThreadSummary], terminal_width: usize) -> ListC
         dir,
         name,
     }
+}
+
+fn list_column_widths_for_columns(
+    threads: &[ThreadSummary],
+    columns: &[ListColumn],
+    terminal_width: usize,
+) -> Vec<usize> {
+    let Some((_last, non_last)) = columns.split_last() else {
+        return Vec::new();
+    };
+
+    let mut widths = non_last
+        .iter()
+        .map(|column| column.non_last_width(threads))
+        .collect::<Vec<_>>();
+    let fixed_width = widths.iter().sum::<usize>();
+    let separator_count = columns.len().saturating_sub(1);
+    let last_width = terminal_width
+        .saturating_sub(1)
+        .saturating_sub(fixed_width)
+        .saturating_sub(separator_count)
+        .max(1);
+    widths.push(last_width);
+    widths
 }
 
 fn bounded_column_width(values: impl IntoIterator<Item = String>, max_width: usize) -> usize {
@@ -962,6 +1100,7 @@ fn bounded_column_width(values: impl IntoIterator<Item = String>, max_width: usi
         .min(max_width)
 }
 
+#[cfg(test)]
 fn list_name_width_for_columns(
     terminal_width: usize,
     agent_width: usize,
@@ -1213,6 +1352,29 @@ mod tests {
             normalize_args(strings(&["lh", "-g", "-10"])),
             strings(&["lh", "list", "-g", "--limit", "10"])
         );
+    }
+
+    #[test]
+    fn inserts_default_list_for_output_flags() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-o", "agent,id"])),
+            strings(&["lh", "list", "-o", "agent,id"])
+        );
+    }
+
+    #[test]
+    fn list_parses_output_columns() {
+        let cli = Cli::try_parse_from(strings(&["lh", "ls", "-o", "agent,id", "name"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::List { output, .. })
+                if output == vec![
+                    "agent".to_string(),
+                    "id".to_string(),
+                    "name".to_string()
+                ]
+        ));
     }
 
     #[test]
@@ -1541,6 +1703,55 @@ mod tests {
                 dir: 30,
                 name: 22,
             }
+        );
+    }
+
+    #[test]
+    fn parses_list_columns_from_field_names() {
+        assert_eq!(
+            parse_list_columns(&[
+                "updated".to_string(),
+                "agent".to_string(),
+                "id".to_string(),
+                "dir".to_string(),
+                "name".to_string()
+            ])
+            .unwrap(),
+            ListColumn::DEFAULT
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_list_columns() {
+        let error = parse_list_columns(&["bogus".to_string()]).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "unknown list column 'bogus'; expected one of updated, created, agent, id, dir, cwd, name, preview, source"
+        );
+    }
+
+    #[test]
+    fn format_threads_respects_selected_columns() {
+        let thread = ThreadSummary {
+            agent: AgentKind::Codex,
+            id: "abc123".to_string(),
+            name: Some("short thread".to_string()),
+            cwd: PathBuf::from("/tmp"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: Some("preview".to_string()),
+            removable: None,
+            resume_hint: None,
+        };
+
+        assert_eq!(
+            format_threads(
+                &[thread],
+                &[ListColumn::Agent, ListColumn::Id, ListColumn::Name]
+            ),
+            "codex abc123 short thread\n"
         );
     }
 

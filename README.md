@@ -13,6 +13,7 @@ lh ls
 lh ls -g
 lh ls -g -5
 lh ls -g -10
+lh ls -o updated,agent,id,dir,name
 lh info [agent] [name-or-id]
 lh info -g [agent] [name-or-id]
 lh alias [target]
@@ -46,6 +47,9 @@ history. List output is unlimited by default and uses `$PAGER` or `less` when
 stdout is a terminal, with Git-style `LESS=FRX` defaults when `LESS` is unset;
 when stdout is piped, it prints directly. Use `-5`, `-10`, or any other numeric
 shorthand to limit the row count.
+Use `-o`/`--output` to choose list columns. Fields can be comma-separated or
+repeated, and supported fields are `updated`, `created`, `agent`, `id`, `dir`,
+`cwd`, `name`, `preview`, and `source`.
 `lh info` prints full details for a selected thread, including its source path.
 `lh rename` updates the native agent title for providers with known writable
 title storage. `lh rename [thread-id] --auto` uses the optional `[llm]` config:
