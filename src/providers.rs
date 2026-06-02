@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::claude::ClaudeProvider;
 use crate::codex::CodexProvider;
-use crate::common::{AgentKind, AgentProvider, LhResult, ThreadSummary};
+use crate::common::{AgentKind, AgentProvider, LhResult, MemoryFile, ThreadSummary};
 use crate::gemini::GeminiProvider;
 use crate::opencode::OpenCodeProvider;
 
@@ -78,8 +78,63 @@ pub fn list_global() -> LhResult<Vec<ThreadSummary>> {
     Ok(threads)
 }
 
+pub fn list_memory_all_for_dirs(cwds: &[PathBuf]) -> LhResult<Vec<MemoryFile>> {
+    let mut memories = Vec::new();
+    for provider in all() {
+        match list_memory_provider_for_dirs(&*provider, cwds) {
+            Ok(mut provider_memories) => memories.append(&mut provider_memories),
+            Err(error) => eprintln!(
+                "warning: failed to read {} memory: {error}",
+                provider.kind()
+            ),
+        }
+    }
+    sort_dedup_memory(&mut memories);
+    Ok(memories)
+}
+
+pub fn list_memory_provider_for_dirs(
+    provider: &dyn AgentProvider,
+    cwds: &[PathBuf],
+) -> LhResult<Vec<MemoryFile>> {
+    let mut memories = Vec::new();
+    for cwd in cwds {
+        match provider.list_memory(cwd) {
+            Ok(mut provider_memories) => memories.append(&mut provider_memories),
+            Err(error) => eprintln!(
+                "warning: failed to read {} memory for {}: {error}",
+                provider.kind(),
+                cwd.display()
+            ),
+        }
+    }
+    sort_dedup_memory(&mut memories);
+    Ok(memories)
+}
+
+pub fn list_memory_global() -> LhResult<Vec<MemoryFile>> {
+    let mut memories = Vec::new();
+    for provider in all() {
+        match provider.list_memory_global() {
+            Ok(mut provider_memories) => memories.append(&mut provider_memories),
+            Err(error) => eprintln!(
+                "warning: failed to read {} memory: {error}",
+                provider.kind()
+            ),
+        }
+    }
+    sort_dedup_memory(&mut memories);
+    Ok(memories)
+}
+
 fn sort_dedup(threads: &mut Vec<ThreadSummary>) {
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
     let mut seen = HashSet::new();
     threads.retain(|thread| seen.insert((thread.agent, thread.id.clone())));
+}
+
+fn sort_dedup_memory(memories: &mut Vec<MemoryFile>) {
+    memories.sort_by_key(|memory| std::cmp::Reverse(memory.updated_sort_key()));
+    let mut seen = HashSet::new();
+    memories.retain(|memory| seen.insert((memory.agent, memory.path.clone())));
 }

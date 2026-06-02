@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::fmt;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::json;
@@ -66,6 +67,25 @@ pub struct ThreadSummary {
     pub preview: Option<String>,
     pub removable: Option<RemovalTarget>,
     pub resume_hint: Option<ResumeHint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryFile {
+    pub agent: AgentKind,
+    pub id: String,
+    pub scope: String,
+    pub cwd: Option<PathBuf>,
+    pub path: PathBuf,
+    pub updated_at: Option<OffsetDateTime>,
+    pub preview: Option<String>,
+}
+
+impl MemoryFile {
+    pub fn updated_sort_key(&self) -> i128 {
+        self.updated_at
+            .map(|time| time.unix_timestamp_nanos())
+            .unwrap_or_default()
+    }
 }
 
 impl ThreadSummary {
@@ -192,6 +212,12 @@ pub trait AgentProvider {
     fn list_threads_global(&self) -> LhResult<Vec<ThreadSummary>>;
     fn new_command(&self, name: Option<&str>, cwd: &std::path::Path) -> LhResult<LaunchCommand>;
     fn resume_command(&self, thread: Option<&ThreadSummary>) -> LhResult<LaunchCommand>;
+    fn list_memory(&self, _cwd: &Path) -> LhResult<Vec<MemoryFile>> {
+        Ok(Vec::new())
+    }
+    fn list_memory_global(&self) -> LhResult<Vec<MemoryFile>> {
+        Ok(Vec::new())
+    }
     fn supports_rename(&self) -> bool {
         false
     }
@@ -234,6 +260,39 @@ pub trait AgentProvider {
             caveat,
         }
     }
+}
+
+pub fn markdown_memory_file(
+    agent: AgentKind,
+    scope: impl Into<String>,
+    cwd: Option<PathBuf>,
+    path: PathBuf,
+) -> Option<MemoryFile> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("md") || !path.is_file() {
+        return None;
+    }
+
+    let id = path.file_name()?.to_str()?.to_string();
+    let preview = fs::read_to_string(&path).ok().and_then(|text| {
+        text.lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(ToString::to_string)
+    });
+    let updated_at = fs::metadata(&path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(OffsetDateTime::from);
+
+    Some(MemoryFile {
+        agent,
+        id,
+        scope: scope.into(),
+        cwd,
+        path,
+        updated_at,
+        preview,
+    })
 }
 
 pub fn default_executable(name: &str) -> PathBuf {

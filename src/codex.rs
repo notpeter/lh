@@ -8,12 +8,12 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::common::{
-    AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ThreadSummary,
-    default_executable,
+    AgentKind, AgentProvider, LaunchCommand, LhResult, MemoryFile, RemovalTarget, ThreadSummary,
+    default_executable, markdown_memory_file,
 };
 use crate::util::{
-    canonicalize_existing, collect_files_with_name_prefix, first_json_text, format_time, home_dir,
-    is_noise_preview_text, parse_time, path_is_at_or_under,
+    canonicalize_existing, collect_files, collect_files_with_name_prefix, first_json_text,
+    format_time, home_dir, is_noise_preview_text, parse_time, path_is_at_or_under,
 };
 
 pub struct CodexProvider {
@@ -59,6 +59,31 @@ impl AgentProvider for CodexProvider {
 
     fn list_threads_global(&self) -> LhResult<Vec<ThreadSummary>> {
         Ok(self.list_rollouts(None))
+    }
+
+    fn list_memory(&self, _cwd: &Path) -> LhResult<Vec<MemoryFile>> {
+        self.list_memory_global()
+    }
+
+    fn list_memory_global(&self) -> LhResult<Vec<MemoryFile>> {
+        let mut memories = Vec::new();
+        for (scope, dir) in [
+            ("global", self.home.join(".codex/memories")),
+            (
+                "chronicle",
+                self.home.join(".codex/memories_extensions/chronicle"),
+            ),
+        ] {
+            collect_files(&dir, &mut |path| {
+                if let Some(memory) =
+                    markdown_memory_file(AgentKind::Codex, scope, None, path.to_path_buf())
+                {
+                    memories.push(memory);
+                }
+            });
+        }
+        memories.sort_by_key(|memory| std::cmp::Reverse(memory.updated_sort_key()));
+        Ok(memories)
     }
 
     fn new_command(&self, _name: Option<&str>, _cwd: &Path) -> LhResult<LaunchCommand> {
@@ -332,6 +357,27 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name.as_deref(), Some("named codex"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello codex"));
+    }
+
+    #[test]
+    fn lists_codex_markdown_memory() {
+        let root = temp_dir("codex-memory");
+        fs::create_dir_all(root.join(".codex/memories")).unwrap();
+        fs::write(
+            root.join(".codex/memories/podman-preference.md"),
+            "Prefer podman over docker",
+        )
+        .unwrap();
+
+        let memories = CodexProvider::with_home(root).list_memory_global().unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].agent, AgentKind::Codex);
+        assert_eq!(memories[0].scope, "global");
+        assert_eq!(memories[0].id, "podman-preference.md");
+        assert_eq!(
+            memories[0].preview.as_deref(),
+            Some("Prefer podman over docker")
+        );
     }
 
     #[test]

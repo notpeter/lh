@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::common::{
-    AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ThreadSummary,
-    default_executable,
+    AgentKind, AgentProvider, LaunchCommand, LhResult, MemoryFile, RemovalTarget, ThreadSummary,
+    default_executable, markdown_memory_file,
 };
 use crate::util::{
     canonicalize_existing, first_json_text, format_time, home_dir, is_noise_preview_text,
@@ -91,6 +91,60 @@ impl AgentProvider for ClaudeProvider {
         }
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
         Ok(threads)
+    }
+
+    fn list_memory(&self, cwd: &Path) -> LhResult<Vec<MemoryFile>> {
+        let canonical_cwd = canonicalize_existing(cwd);
+        let projects_dir = self.home.join(".claude/projects");
+        let mut exact_dirs = vec![canonical_cwd.clone()];
+        if let Some(git_root) = git_root(&canonical_cwd)
+            && !exact_dirs.contains(&git_root)
+        {
+            exact_dirs.push(git_root);
+        }
+
+        let mut memories = Vec::new();
+        for dir in exact_dirs {
+            memories.extend(
+                self.list_memory_project_dir(
+                    &projects_dir.join(encode_project_path(&dir)),
+                    Some(dir),
+                ),
+            );
+        }
+
+        memories.extend(self.list_memory_global()?.into_iter().filter(|memory| {
+            memory.cwd.as_ref().is_some_and(|memory_cwd| {
+                path_is_at_or_under(&canonical_cwd, memory_cwd)
+                    || path_is_at_or_under(memory_cwd, &canonical_cwd)
+            })
+        }));
+        memories.sort_by_key(|memory| std::cmp::Reverse(memory.updated_sort_key()));
+        let mut seen = std::collections::HashSet::new();
+        memories.retain(|memory| seen.insert(memory.path.clone()));
+        Ok(memories)
+    }
+
+    fn list_memory_global(&self) -> LhResult<Vec<MemoryFile>> {
+        let projects_dir = self.home.join(".claude/projects");
+        let Ok(entries) = fs::read_dir(projects_dir) else {
+            return Ok(Vec::new());
+        };
+
+        let mut memories = Vec::new();
+        for entry in entries.flatten() {
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let cwd = project_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(decode_project_path);
+            memories.extend(self.list_memory_project_dir(&project_dir, cwd));
+        }
+        memories.sort_by_key(|memory| std::cmp::Reverse(memory.updated_sort_key()));
+        Ok(memories)
     }
 
     fn new_command(&self, name: Option<&str>, _cwd: &Path) -> LhResult<LaunchCommand> {
@@ -186,6 +240,23 @@ impl AgentProvider for ClaudeProvider {
 }
 
 impl ClaudeProvider {
+    fn list_memory_project_dir(&self, project_dir: &Path, cwd: Option<PathBuf>) -> Vec<MemoryFile> {
+        let memory_dir = project_dir.join("memory");
+        let Ok(entries) = fs::read_dir(memory_dir) else {
+            return Vec::new();
+        };
+
+        let mut memories = Vec::new();
+        for entry in entries.flatten() {
+            if let Some(memory) =
+                markdown_memory_file(AgentKind::Claude, "project", cwd.clone(), entry.path())
+            {
+                memories.push(memory);
+            }
+        }
+        memories
+    }
+
     fn list_project_dir(
         &self,
         project_dir: &Path,
@@ -411,8 +482,7 @@ fn claude_thread_content(path: &Path) -> LhResult<String> {
     Ok(out.join("\n\n"))
 }
 
-#[cfg(test)]
-pub fn encode_project_path(path: &Path) -> String {
+fn encode_project_path(path: &Path) -> String {
     path.to_string_lossy().replace('/', "-")
 }
 
@@ -422,6 +492,17 @@ fn decode_project_path(value: &str) -> PathBuf {
     } else {
         PathBuf::from(value.replace('-', "/"))
     }
+}
+
+fn git_root(cwd: &Path) -> Option<PathBuf> {
+    let mut current = Some(cwd);
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -467,6 +548,30 @@ mod tests {
         assert_eq!(threads[0].id, "abc");
         assert_eq!(threads[0].name.as_deref(), Some("named claude"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello claude"));
+    }
+
+    #[test]
+    fn lists_claude_project_memory() {
+        let root = temp_dir("claude-memory");
+        let cwd = root.join("work");
+        let child = cwd.join("child");
+        fs::create_dir_all(cwd.join(".git")).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        let provider = ClaudeProvider::with_home(root);
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(project_dir.join("memory")).unwrap();
+        fs::write(
+            project_dir.join("memory/MEMORY.md"),
+            "# Project memory\n\nremember this",
+        )
+        .unwrap();
+
+        let memories = provider.list_memory(&child).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].agent, AgentKind::Claude);
+        assert_eq!(memories[0].scope, "project");
+        assert_eq!(memories[0].id, "MEMORY.md");
+        assert_eq!(memories[0].preview.as_deref(), Some("# Project memory"));
     }
 
     #[test]

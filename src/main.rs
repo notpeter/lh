@@ -19,7 +19,9 @@ use std::process::{Command, Stdio};
 
 use clap::{Parser, Subcommand};
 
-use common::{AgentKind, AgentProvider, LaunchCommand, LhResult, RemovalTarget, ThreadSummary};
+use common::{
+    AgentKind, AgentProvider, LaunchCommand, LhResult, MemoryFile, RemovalTarget, ThreadSummary,
+};
 use fuzzy::MatchResult;
 use util::{canonicalize_existing, format_display_time, format_time, shorten_path, terminal_width};
 
@@ -98,6 +100,15 @@ enum Commands {
         #[arg(help = "Thread name/id to inspect, or agent when followed by NAME-OR-ID")]
         agent_or_name: Option<String>,
         #[arg(help = "Thread name/id when AGENT-OR-NAME is an agent")]
+        name: Option<String>,
+    },
+    #[command(about = "List or show agent memory files", alias = "mem")]
+    Memory {
+        #[arg(short = 'g', long = "global", help = "Scan all known memory files")]
+        global: bool,
+        #[arg(help = "Memory file to show, or agent when followed by NAME-OR-ID")]
+        agent_or_name: Option<String>,
+        #[arg(help = "Memory file to show when AGENT-OR-NAME is an agent")]
         name: Option<String>,
     },
     #[command(about = "Link the current directory with another checkout")]
@@ -226,6 +237,11 @@ fn run() -> LhResult<()> {
             agent_or_name,
             name,
         } => info(&cwd, global, agent_or_name, name),
+        Commands::Memory {
+            global,
+            agent_or_name,
+            name,
+        } => memory(&cwd, global, agent_or_name, name),
         Commands::Alias {
             symbolic,
             delete,
@@ -340,7 +356,10 @@ fn is_global_arg(arg: &OsString) -> bool {
 }
 
 fn global_flag_subcommand(arg: &str) -> bool {
-    matches!(arg, "list" | "ls" | "rename" | "info" | "remove" | "rm")
+    matches!(
+        arg,
+        "list" | "ls" | "rename" | "info" | "memory" | "mem" | "remove" | "rm"
+    )
 }
 
 fn is_numeric_limit_arg(arg: &OsString) -> bool {
@@ -522,6 +541,34 @@ fn info(
     let (provider, thread) = select_provider_thread(cwd, global, agent, query.as_deref())?;
     let thread = thread.ok_or("no thread selected")?;
     print_thread_info(&*provider, &thread);
+    Ok(())
+}
+
+fn memory(
+    cwd: &Path,
+    global: bool,
+    agent_or_name: Option<String>,
+    name: Option<String>,
+) -> LhResult<()> {
+    let (agent, query) = parse_selector(agent_or_name, name)?;
+    let memories = list_memory(cwd, global, agent)?;
+
+    if let Some(query) = query.as_deref() {
+        let memory = select_memory(&memories, query)?;
+        print_memory_file(memory)?;
+        return Ok(());
+    }
+
+    if memories.is_empty() {
+        if global {
+            println!("No memory files found");
+        } else {
+            println!("No memory files found for {}", cwd.display());
+        }
+        return Ok(());
+    }
+
+    page_or_print(&format_memory_files(&memories))?;
     Ok(())
 }
 
@@ -851,6 +898,161 @@ fn ambiguous_error(candidates: Vec<&ThreadSummary>) -> String {
         ));
     }
     out
+}
+
+fn list_memory(cwd: &Path, global: bool, agent: Option<AgentKind>) -> LhResult<Vec<MemoryFile>> {
+    if let Some(agent) = agent {
+        let provider = providers::by_kind(agent);
+        return if global {
+            provider.list_memory_global()
+        } else {
+            let dirs = config::alias_group(cwd)?;
+            providers::list_memory_provider_for_dirs(&*provider, &dirs)
+        };
+    }
+
+    if global {
+        providers::list_memory_global()
+    } else {
+        let dirs = config::alias_group(cwd)?;
+        providers::list_memory_all_for_dirs(&dirs)
+    }
+}
+
+fn select_memory<'a>(memories: &'a [MemoryFile], query: &str) -> LhResult<&'a MemoryFile> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return Err("no memory file selected".into());
+    }
+
+    let matches = memories
+        .iter()
+        .filter(|memory| memory_matches(memory, &query))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [memory] => Ok(memory),
+        [] => Err("no matching memory file found".into()),
+        _ => Err(ambiguous_memory_error(matches).into()),
+    }
+}
+
+fn memory_matches(memory: &MemoryFile, query: &str) -> bool {
+    let id = memory.id.to_ascii_lowercase();
+    let stem = memory
+        .path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let path = memory.path.display().to_string().to_ascii_lowercase();
+    let scope = memory.scope.to_ascii_lowercase();
+    let cwd = memory
+        .cwd
+        .as_ref()
+        .map(|cwd| cwd.display().to_string().to_ascii_lowercase())
+        .unwrap_or_default();
+    let preview = memory
+        .preview
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    id == query
+        || stem == query
+        || id.contains(query)
+        || path.contains(query)
+        || scope.contains(query)
+        || cwd.contains(query)
+        || preview.contains(query)
+}
+
+fn ambiguous_memory_error(candidates: Vec<&MemoryFile>) -> String {
+    let mut out = String::from("ambiguous memory match; use a more specific query:");
+    for memory in candidates.into_iter().take(8) {
+        out.push_str(&format!(
+            "\n  {:<7} {:<9} {:<30} {}",
+            memory.agent.as_str(),
+            memory.scope,
+            memory.id,
+            shorten_path(&memory.path)
+        ));
+    }
+    out
+}
+
+fn format_memory_files(memories: &[MemoryFile]) -> String {
+    format_memory_files_for_rows(memories)
+}
+
+fn format_memory_files_for_rows(memories: &[MemoryFile]) -> String {
+    let updated_width = 19;
+    let agent_width = bounded_column_width(
+        memories
+            .iter()
+            .map(|memory| memory.agent.as_str().to_string()),
+        10,
+    )
+    .max("agent".len());
+    let scope_width = bounded_column_width(memories.iter().map(|memory| memory.scope.clone()), 12)
+        .max("scope".len());
+    let dir_width = bounded_column_width(memories.iter().map(memory_dir), 30).max("dir".len());
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{updated:<updated_width$} {agent:<agent_width$} {scope:<scope_width$} {dir:<dir_width$} {path}\n",
+        updated = "updated",
+        agent = "agent",
+        scope = "scope",
+        dir = "dir",
+        path = "path",
+    ));
+    for memory in memories {
+        let updated = memory
+            .updated_at
+            .map(format_display_time)
+            .unwrap_or_else(|| "-".to_string());
+        let dir = memory_dir(memory);
+        let path = shorten_path(&memory.path);
+        out.push_str(&format!(
+            "{updated:<updated_width$} {agent:<agent_width$} {scope:<scope_width$} {dir:<dir_width$} {path}\n",
+            updated = common::truncate(&updated, updated_width),
+            agent = memory.agent.as_str(),
+            scope = memory.scope,
+            dir = common::truncate(&dir, dir_width),
+            path = path,
+        ));
+    }
+    out
+}
+
+fn memory_dir(memory: &MemoryFile) -> String {
+    memory
+        .cwd
+        .as_ref()
+        .map(|cwd| shorten_path(cwd))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn print_memory_file(memory: &MemoryFile) -> LhResult<()> {
+    let field = |name: &str, value: String| {
+        println!("{name:<8} {value}");
+    };
+
+    field("Agent", memory.agent.display_name().to_string());
+    field("Scope", memory.scope.clone());
+    if let Some(cwd) = &memory.cwd {
+        field("CWD", cwd.display().to_string());
+    }
+    field("Path", memory.path.display().to_string());
+    field(
+        "Updated",
+        memory
+            .updated_at
+            .map(format_time)
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    println!();
+    page_or_print(&fs::read_to_string(&memory.path)?)?;
+    Ok(())
 }
 
 fn format_threads(threads: &[ThreadSummary], columns: &[ListColumn]) -> String {
@@ -1401,6 +1603,14 @@ mod tests {
     }
 
     #[test]
+    fn moves_global_flag_in_front_of_memory() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-g", "memory", "MEMORY.md"])),
+            strings(&["lh", "memory", "-g", "MEMORY.md"])
+        );
+    }
+
+    #[test]
     fn moves_global_flag_in_front_of_remove() {
         assert_eq!(
             normalize_args(strings(&["lh", "-g", "rm", "abc123", "--dry-run"])),
@@ -1566,6 +1776,56 @@ mod tests {
                 command: AgentsCommand::List
             })
         ));
+    }
+
+    #[test]
+    fn memory_command_parses_agent_selector() {
+        let cli = Cli::try_parse_from(strings(&["lh", "mem", "claude", "MEMORY.md"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Memory {
+                agent_or_name: Some(agent),
+                name: Some(name),
+                ..
+            }) if agent == "claude" && name == "MEMORY.md"
+        ));
+    }
+
+    #[test]
+    fn format_memory_files_shows_dir_and_path_columns() {
+        let memories = vec![
+            MemoryFile {
+                agent: AgentKind::Claude,
+                id: "MEMORY.md".to_string(),
+                scope: "project".to_string(),
+                cwd: Some(PathBuf::from("/tmp/project")),
+                path: PathBuf::from("/tmp/memory/MEMORY.md"),
+                updated_at: None,
+                preview: Some("# Project memory".to_string()),
+            },
+            MemoryFile {
+                agent: AgentKind::Codex,
+                id: "podman-preference.md".to_string(),
+                scope: "global".to_string(),
+                cwd: None,
+                path: PathBuf::from("/tmp/memories/podman-preference.md"),
+                updated_at: None,
+                preview: Some("Prefer podman over docker".to_string()),
+            },
+        ];
+
+        let output = format_memory_files_for_rows(&memories);
+
+        assert!(output.starts_with("updated"));
+        assert!(output.lines().next().unwrap().contains("dir"));
+        assert!(output.lines().next().unwrap().contains("path"));
+        assert!(!output.lines().next().unwrap().contains("preview"));
+        assert!(output.contains("claude project /tmp/project"));
+        assert!(output.contains("/tmp/memory/MEMORY.md"));
+        assert!(output.contains("codex  global  -"));
+        assert!(output.contains("/tmp/memories/podman-preference.md"));
+        assert!(!output.contains("Prefer podman over docker"));
     }
 
     #[test]
