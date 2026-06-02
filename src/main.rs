@@ -2,7 +2,6 @@ mod claude;
 mod codex;
 mod common;
 mod config;
-mod db;
 mod fuzzy;
 mod gemini;
 mod llm;
@@ -159,27 +158,12 @@ enum Commands {
         #[command(subcommand)]
         command: AgentsCommand,
     },
-    #[command(about = "Manage the optional SQLite cache")]
-    Db {
-        #[command(subcommand)]
-        command: DbCommand,
-    },
 }
 
 #[derive(Subcommand)]
 enum AgentsCommand {
     #[command(about = "Show provider status", alias = "ls")]
     List,
-}
-
-#[derive(Subcommand)]
-enum DbCommand {
-    #[command(about = "Initialize the optional SQLite cache")]
-    Init,
-    #[command(about = "Refresh the optional SQLite cache")]
-    Refresh,
-    #[command(about = "Drop the optional SQLite cache")]
-    Drop,
 }
 
 fn main() {
@@ -260,23 +244,6 @@ fn run() -> LhResult<()> {
         Commands::Agent {
             command: AgentsCommand::List,
         } => agents_list(&cwd),
-        Commands::Db { command } => match command {
-            DbCommand::Init => {
-                let path = db::init()?;
-                println!("initialized {}", path.display());
-                Ok(())
-            }
-            DbCommand::Refresh => {
-                let (path, count) = db::refresh(&cwd)?;
-                println!("refreshed {} with {count} thread(s)", path.display());
-                Ok(())
-            }
-            DbCommand::Drop => {
-                let path = db::drop_db()?;
-                println!("dropped {}", path.display());
-                Ok(())
-            }
-        },
     }
 }
 

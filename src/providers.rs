@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::claude::ClaudeProvider;
 use crate::codex::CodexProvider;
@@ -23,10 +23,6 @@ pub fn by_kind(kind: AgentKind) -> Box<dyn AgentProvider> {
         AgentKind::OpenCode => Box::new(OpenCodeProvider::new()),
         AgentKind::Gemini => Box::new(GeminiProvider::new()),
     }
-}
-
-pub fn list_all(cwd: &Path) -> LhResult<Vec<ThreadSummary>> {
-    list_all_for_dirs(&[cwd.to_path_buf()])
 }
 
 pub fn list_all_for_dirs(cwds: &[PathBuf]) -> LhResult<Vec<ThreadSummary>> {

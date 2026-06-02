@@ -4,10 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::json;
 use time::OffsetDateTime;
 
-use crate::util::{find_executable, format_time};
+use crate::util::find_executable;
 
 pub type LhResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -101,20 +100,6 @@ impl ThreadSummary {
             .or(self.created_at)
             .map(|time| time.unix_timestamp_nanos())
             .unwrap_or_default()
-    }
-
-    pub fn raw_json(&self) -> String {
-        json!({
-            "agent": self.agent.as_str(),
-            "id": self.id,
-            "name": self.name,
-            "cwd": self.cwd,
-            "created_at": self.created_at.map(format_time),
-            "updated_at": self.updated_at.map(format_time),
-            "source_path": self.source_path,
-            "preview": self.preview,
-        })
-        .to_string()
     }
 }
 

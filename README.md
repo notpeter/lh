@@ -31,16 +31,11 @@ lh rename [thread-id] --auto
 lh rename [thread-id] --auto --dry-run
 lh remove <name-or-id> --dry-run
 lh remove <agent> <name-or-id> --force
-
-lh db init
-lh db refresh
-lh db drop
 ```
 
 Agent aliases include `claude`, `claude-code`, `codex`, `opencode`, `open-code`,
-`gemini`, and `gemini-cli`. By default, commands read agent histories directly
-from their native stores; the SQLite database is an explicit cache under the
-platform data directory.
+`gemini`, and `gemini-cli`. Commands read agent histories directly from their
+native stores.
 
 `lh ls` is scoped to the current directory. `lh ls -g` scans all known agent
 history. List output is unlimited by default and uses `$PAGER` or `less` when
