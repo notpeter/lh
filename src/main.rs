@@ -11,6 +11,7 @@ mod providers;
 mod util;
 
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -168,6 +169,9 @@ enum AgentsCommand {
 
 fn main() {
     if let Err(error) = run() {
+        if is_broken_pipe_error(error.as_ref()) {
+            return;
+        }
         eprintln!("lh: {error}");
         std::process::exit(1);
     }
@@ -247,6 +251,52 @@ fn run() -> LhResult<()> {
     }
 }
 
+macro_rules! out {
+    ($($arg:tt)*) => {
+        write_stdout(format_args!($($arg)*))?
+    };
+}
+
+macro_rules! outln {
+    () => {
+        write_stdout_line(format_args!(""))?
+    };
+    ($($arg:tt)*) => {
+        write_stdout_line(format_args!($($arg)*))?
+    };
+}
+
+fn write_stdout(args: fmt::Arguments<'_>) -> io::Result<()> {
+    io::stdout().lock().write_fmt(args)
+}
+
+fn write_stdout_line(args: fmt::Arguments<'_>) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    stdout.write_fmt(args)?;
+    stdout.write_all(b"\n")
+}
+
+fn write_stdout_bytes(bytes: &[u8]) -> io::Result<()> {
+    io::stdout().lock().write_all(bytes)
+}
+
+fn is_broken_pipe_error(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
+    }
+}
+
 fn list(cwd: &Path, global: bool, limit: Option<usize>, output: Vec<String>) -> LhResult<()> {
     let columns = parse_list_columns(&output)?;
     let mut threads = if global {
@@ -261,9 +311,9 @@ fn list(cwd: &Path, global: bool, limit: Option<usize>, output: Vec<String>) -> 
 
     if threads.is_empty() {
         if global {
-            println!("No threads found");
+            outln!("No threads found");
         } else {
-            println!("No threads found for {}", cwd.display());
+            outln!("No threads found for {}", cwd.display());
         }
         return Ok(());
     }
@@ -382,12 +432,12 @@ fn rename(cwd: &Path, request: RenameRequest) -> LhResult<()> {
     let name = match mode {
         RenameMode::Unset => {
             if request.dry_run {
-                println!("would unset name for {} {}", thread.agent, thread.id);
+                outln!("would unset name for {} {}", thread.agent, thread.id);
                 return Ok(());
             }
 
             provider.unset_thread_name(&thread)?;
-            println!("unset name for {} {}", thread.agent, thread.id);
+            outln!("unset name for {} {}", thread.agent, thread.id);
             return Ok(());
         }
         RenameMode::Manual(name) => name,
@@ -416,12 +466,12 @@ fn rename(cwd: &Path, request: RenameRequest) -> LhResult<()> {
     }
 
     if request.dry_run {
-        println!("would rename {} {} to {}", thread.agent, thread.id, name);
+        outln!("would rename {} {} to {}", thread.agent, thread.id, name);
         return Ok(());
     }
 
     provider.rename_thread(&thread, &name)?;
-    println!("renamed {} {} to {}", thread.agent, thread.id, name);
+    outln!("renamed {} {} to {}", thread.agent, thread.id, name);
     Ok(())
 }
 
@@ -507,7 +557,7 @@ fn info(
     let (agent, query) = parse_selector(agent_or_name, name)?;
     let (provider, thread) = select_provider_thread(cwd, global, agent, query.as_deref())?;
     let thread = thread.ok_or("no thread selected")?;
-    print_thread_info(&*provider, &thread);
+    print_thread_info(&*provider, &thread)?;
     Ok(())
 }
 
@@ -528,9 +578,9 @@ fn memory(
 
     if memories.is_empty() {
         if global {
-            println!("No memory files found");
+            outln!("No memory files found");
         } else {
-            println!("No memory files found for {}", cwd.display());
+            outln!("No memory files found for {}", cwd.display());
         }
         return Ok(());
     }
@@ -567,21 +617,21 @@ fn alias(
     };
 
     let (source, target, path) = config::add_alias(cwd, &source, &target)?;
-    println!("aliased {source} -> {target}");
-    println!("config {}", path.display());
+    outln!("aliased {source} -> {target}");
+    outln!("config {}", path.display());
     Ok(())
 }
 
 fn print_aliases(cwd: &Path) -> LhResult<()> {
     let aliases = config::aliases_for_dir(cwd)?;
     if aliases.is_empty() {
-        println!("No aliases configured for current directory");
-        println!("config {}", config::config_path().display());
+        outln!("No aliases configured for current directory");
+        outln!("config {}", config::config_path().display());
         return Ok(());
     }
 
     for (source, target) in aliases {
-        println!("{source} -> {target}");
+        outln!("{source} -> {target}");
     }
     Ok(())
 }
@@ -596,13 +646,13 @@ fn unalias(cwd: &Path, dir: Option<PathBuf>) -> LhResult<()> {
     let (removed, path) = config::remove_alias(cwd, &dir)?;
 
     if removed.is_empty() {
-        println!("No aliases removed");
+        outln!("No aliases removed");
     } else {
         for (source, target) in removed {
-            println!("removed alias {source} -> {target}");
+            outln!("removed alias {source} -> {target}");
         }
     }
-    println!("config {}", path.display());
+    outln!("config {}", path.display());
     Ok(())
 }
 
@@ -629,17 +679,17 @@ fn remove(
     let description = removal_description(&thread, &target);
 
     if dry_run {
-        println!("would remove {description}");
+        outln!("would remove {description}");
         return Ok(());
     }
 
     if !force && !confirm(&format!("Remove {description}?"))? {
-        println!("not removed");
+        outln!("not removed");
         return Ok(());
     }
 
     execute_removal(target)?;
-    println!("removed {description}");
+    outln!("removed {description}");
     Ok(())
 }
 
@@ -670,7 +720,7 @@ fn parse_remove_selector(
 fn agents_list(cwd: &Path) -> LhResult<()> {
     for (index, provider) in providers::all().into_iter().enumerate() {
         if index > 0 {
-            println!();
+            outln!();
         }
         let status = provider.status(cwd);
         let path = status.executable.as_ref().map(|path| shorten_path(path));
@@ -685,23 +735,24 @@ fn agents_list(cwd: &Path) -> LhResult<()> {
             .as_ref()
             .map(|version| version_display(version))
             .unwrap_or_else(|| "-".to_string());
-        println!("{}:", status.agent.as_str());
-        print_agent_value("path:", &path);
+        outln!("{}:", status.agent.as_str());
+        print_agent_value("path:", &path)?;
         if let Some(target) = target.as_deref() {
-            print_agent_value("target:", target);
+            print_agent_value("target:", target)?;
         }
-        print_agent_value("version:", &version);
-        print_agent_value("history:", &shorten_path(&status.history_path));
-        print_agent_value("threads:", &status.thread_count.to_string());
+        print_agent_value("version:", &version)?;
+        print_agent_value("history:", &shorten_path(&status.history_path))?;
+        print_agent_value("threads:", &status.thread_count.to_string())?;
         if let Some(caveat) = status.caveat.as_deref() {
-            print_agent_value("caveat:", caveat);
+            print_agent_value("caveat:", caveat)?;
         }
     }
     Ok(())
 }
 
-fn print_agent_value(label: &str, value: &str) {
-    println!("  {label:<11}{value}");
+fn print_agent_value(label: &str, value: &str) -> LhResult<()> {
+    outln!("  {label:<11}{value}");
+    Ok(())
 }
 
 fn symlink_target(path: &Path) -> Option<PathBuf> {
@@ -1000,24 +1051,22 @@ fn memory_dir(memory: &MemoryFile) -> String {
 }
 
 fn print_memory_file(memory: &MemoryFile) -> LhResult<()> {
-    let field = |name: &str, value: String| {
-        println!("{name:<8} {value}");
-    };
+    let field = |name: &str, value: String| write_stdout_line(format_args!("{name:<8} {value}"));
 
-    field("Agent", memory.agent.display_name().to_string());
-    field("Scope", memory.scope.clone());
+    field("Agent", memory.agent.display_name().to_string())?;
+    field("Scope", memory.scope.clone())?;
     if let Some(cwd) = &memory.cwd {
-        field("CWD", cwd.display().to_string());
+        field("CWD", cwd.display().to_string())?;
     }
-    field("Path", memory.path.display().to_string());
+    field("Path", memory.path.display().to_string())?;
     field(
         "Updated",
         memory
             .updated_at
             .map(format_time)
             .unwrap_or_else(|| "-".to_string()),
-    );
-    println!();
+    )?;
+    outln!();
     page_or_print(&fs::read_to_string(&memory.path)?)?;
     Ok(())
 }
@@ -1045,7 +1094,7 @@ fn format_threads(threads: &[ThreadSummary], columns: &[ListColumn]) -> String {
 
 fn page_or_print(output: &str) -> LhResult<()> {
     if !io::stdout().is_terminal() {
-        print!("{output}");
+        write_stdout_bytes(output.as_bytes())?;
         return Ok(());
     }
 
@@ -1287,32 +1336,30 @@ fn list_name_width_for_columns(
         .max(1)
 }
 
-fn print_thread_info(provider: &dyn AgentProvider, thread: &ThreadSummary) {
-    let field = |name: &str, value: String| {
-        println!("{name:<14} {value}");
-    };
+fn print_thread_info(provider: &dyn AgentProvider, thread: &ThreadSummary) -> LhResult<()> {
+    let field = |name: &str, value: String| write_stdout_line(format_args!("{name:<14} {value}"));
 
-    field("Agent", thread.agent.display_name().to_string());
-    field("ID", thread.id.clone());
+    field("Agent", thread.agent.display_name().to_string())?;
+    field("ID", thread.id.clone())?;
     field(
         "Name",
         thread.name.clone().unwrap_or_else(|| "<unset>".to_string()),
-    );
-    field("CWD", thread.cwd.display().to_string());
+    )?;
+    field("CWD", thread.cwd.display().to_string())?;
     field(
         "Created",
         thread
             .created_at
             .map(format_time)
             .unwrap_or_else(|| "-".to_string()),
-    );
+    )?;
     field(
         "Updated",
         thread
             .updated_at
             .map(format_time)
             .unwrap_or_else(|| "-".to_string()),
-    );
+    )?;
     field(
         "Source",
         thread
@@ -1320,16 +1367,17 @@ fn print_thread_info(provider: &dyn AgentProvider, thread: &ThreadSummary) {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "-".to_string()),
-    );
+    )?;
     if let Some(preview) = &thread.preview {
-        field("Preview", common::truncate(preview, 500));
+        field("Preview", common::truncate(preview, 500))?;
     }
     if let Some(target) = &thread.removable {
-        field("Removable", removal_description(thread, target));
+        field("Removable", removal_description(thread, target))?;
     }
     if let Ok(command) = provider.resume_command(Some(thread)) {
-        field("Resume", command.display());
+        field("Resume", command.display())?;
     }
+    Ok(())
 }
 
 fn select_alias_dir(cwd: &Path, query: Option<&str>) -> LhResult<PathBuf> {
@@ -1481,7 +1529,7 @@ fn execute_removal(target: RemovalTarget) -> LhResult<()> {
 }
 
 fn confirm(prompt: &str) -> LhResult<bool> {
-    print!("{prompt} [y/N] ");
+    out!("{prompt} [y/N] ");
     io::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
@@ -1505,6 +1553,15 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn detects_broken_pipe_errors() {
+        let broken_pipe = io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed");
+        let other = io::Error::new(io::ErrorKind::NotFound, "missing");
+
+        assert!(is_broken_pipe_error(&broken_pipe));
+        assert!(!is_broken_pipe_error(&other));
     }
 
     #[test]
