@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clap::{Parser, Subcommand};
+use regex::Regex;
 
 use common::{
     AgentKind, AgentProvider, LaunchCommand, LhResult, MemoryFile, RemovalTarget, ThreadSummary,
@@ -50,6 +51,20 @@ enum Commands {
             help = "Columns to show, comma-separated or repeated"
         )]
         output: Vec<String>,
+        #[arg(
+            long,
+            value_name = "TERM",
+            num_args = 1..,
+            help = "Filter rows by one or more case-insensitive terms; all terms must match"
+        )]
+        search: Vec<String>,
+        #[arg(
+            long,
+            value_name = "REGEX",
+            num_args = 1..,
+            help = "Filter rows by one or more regular expressions; all regexes must match"
+        )]
+        regex: Vec<String>,
     },
     #[command(about = "Start a new agent thread")]
     New {
@@ -185,12 +200,16 @@ fn run() -> LhResult<()> {
         global: false,
         limit: None,
         output: Vec::new(),
+        search: Vec::new(),
+        regex: Vec::new(),
     }) {
         Commands::List {
             global,
             limit,
             output,
-        } => list(&cwd, global, limit, output),
+            search,
+            regex,
+        } => list(&cwd, global, limit, output, search, regex),
         Commands::New { agent, name } => new_thread(&cwd, agent, name),
         Commands::Resume {
             agent_or_name,
@@ -297,20 +316,35 @@ fn is_broken_pipe_error(mut error: &(dyn std::error::Error + 'static)) -> bool {
     }
 }
 
-fn list(cwd: &Path, global: bool, limit: Option<usize>, output: Vec<String>) -> LhResult<()> {
+fn list(
+    cwd: &Path,
+    global: bool,
+    limit: Option<usize>,
+    output: Vec<String>,
+    search: Vec<String>,
+    regex: Vec<String>,
+) -> LhResult<()> {
     let columns = parse_list_columns(&output)?;
+    let filters = ListFilters::new(search, regex)?;
     let mut threads = if global {
         providers::list_global()?
     } else {
         let dirs = config::alias_group(cwd)?;
         providers::list_all_for_dirs(&dirs)?
     };
+    threads = filter_threads(threads, &filters);
     if let Some(limit) = limit {
         threads.truncate(limit);
     }
 
     if threads.is_empty() {
-        if global {
+        if !filters.is_empty() {
+            if global {
+                outln!("No matching threads found");
+            } else {
+                outln!("No matching threads found for {}", cwd.display());
+            }
+        } else if global {
             outln!("No threads found");
         } else {
             outln!("No threads found for {}", cwd.display());
@@ -319,6 +353,89 @@ fn list(cwd: &Path, global: bool, limit: Option<usize>, output: Vec<String>) -> 
     }
     page_or_print(&format_threads(&threads, &columns))?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct ListFilters {
+    search_terms: Vec<String>,
+    regexes: Vec<Regex>,
+}
+
+impl ListFilters {
+    fn new(search_terms: Vec<String>, regexes: Vec<String>) -> LhResult<Self> {
+        let search_terms = search_terms
+            .into_iter()
+            .map(|term| term.trim().to_ascii_lowercase())
+            .filter(|term| !term.is_empty())
+            .collect();
+        let regexes = regexes
+            .into_iter()
+            .map(|pattern| {
+                Regex::new(&pattern)
+                    .map_err(|error| format!("invalid regex '{pattern}': {error}").into())
+            })
+            .collect::<LhResult<Vec<_>>>()?;
+
+        Ok(Self {
+            search_terms,
+            regexes,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.search_terms.is_empty() && self.regexes.is_empty()
+    }
+}
+
+fn filter_threads(threads: Vec<ThreadSummary>, filters: &ListFilters) -> Vec<ThreadSummary> {
+    if filters.is_empty() {
+        return threads;
+    }
+
+    threads
+        .into_iter()
+        .filter(|thread| thread_matches_filters(thread, filters))
+        .collect()
+}
+
+fn thread_matches_filters(thread: &ThreadSummary, filters: &ListFilters) -> bool {
+    let haystack = thread_search_text(thread);
+    let lower_haystack = haystack.to_ascii_lowercase();
+
+    filters
+        .search_terms
+        .iter()
+        .all(|term| lower_haystack.contains(term))
+        && filters
+            .regexes
+            .iter()
+            .all(|regex| regex.is_match(&haystack))
+}
+
+fn thread_search_text(thread: &ThreadSummary) -> String {
+    let mut fields = vec![
+        thread.agent.as_str().to_string(),
+        thread.id.clone(),
+        thread.cwd.display().to_string(),
+    ];
+
+    if let Some(name) = &thread.name {
+        fields.push(name.clone());
+    }
+    if let Some(preview) = &thread.preview {
+        fields.push(preview.clone());
+    }
+    if let Some(path) = &thread.source_path {
+        fields.push(path.display().to_string());
+    }
+    if let Some(created_at) = thread.created_at {
+        fields.push(format_display_time(created_at));
+    }
+    if let Some(updated_at) = thread.updated_at {
+        fields.push(format_display_time(updated_at));
+    }
+
+    fields.join("\n")
 }
 
 fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
@@ -364,7 +481,11 @@ fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
 
 fn is_list_shortcut_arg(arg: &OsString) -> bool {
     let value = arg.to_string_lossy();
-    is_global_arg(arg) || matches!(value.as_ref(), "--limit" | "-o" | "--output")
+    is_global_arg(arg)
+        || matches!(
+            value.as_ref(),
+            "--limit" | "-o" | "--output" | "--search" | "--regex"
+        )
 }
 
 fn is_global_arg(arg: &OsString) -> bool {
@@ -1589,6 +1710,14 @@ mod tests {
     }
 
     #[test]
+    fn inserts_default_list_for_search_flags() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "--search", "parser", "codex"])),
+            strings(&["lh", "list", "--search", "parser", "codex"])
+        );
+    }
+
+    #[test]
     fn list_parses_output_columns() {
         let cli = Cli::try_parse_from(strings(&["lh", "ls", "-o", "agent,id", "name"])).unwrap();
 
@@ -1600,6 +1729,28 @@ mod tests {
                     "id".to_string(),
                     "name".to_string()
                 ]
+        ));
+    }
+
+    #[test]
+    fn list_parses_search_and_regex_filters() {
+        let cli = Cli::try_parse_from(strings(&[
+            "lh",
+            "ls",
+            "--search",
+            "parser",
+            "codex",
+            "--regex",
+            "fix|repair",
+            "src/.*\\.rs",
+        ]))
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::List { search, regex, .. })
+                if search == vec!["parser".to_string(), "codex".to_string()]
+                    && regex == vec!["fix|repair".to_string(), "src/.*\\.rs".to_string()]
         ));
     }
 
@@ -2037,6 +2188,112 @@ mod tests {
             ),
             "codex abc123 short thread\n"
         );
+    }
+
+    #[test]
+    fn search_filters_require_all_terms_case_insensitively() {
+        let threads = vec![
+            ThreadSummary {
+                agent: AgentKind::Codex,
+                id: "abc123".to_string(),
+                name: Some("Fix Parser".to_string()),
+                cwd: PathBuf::from("/tmp/project"),
+                created_at: None,
+                updated_at: None,
+                source_path: None,
+                preview: Some("handles json history".to_string()),
+                removable: None,
+                resume_hint: None,
+            },
+            ThreadSummary {
+                agent: AgentKind::Claude,
+                id: "def456".to_string(),
+                name: Some("Fix formatter".to_string()),
+                cwd: PathBuf::from("/tmp/project"),
+                created_at: None,
+                updated_at: None,
+                source_path: None,
+                preview: Some("parser is out of scope".to_string()),
+                removable: None,
+                resume_hint: None,
+            },
+            ThreadSummary {
+                agent: AgentKind::OpenCode,
+                id: "ghi789".to_string(),
+                name: Some("Parser cleanup".to_string()),
+                cwd: PathBuf::from("/tmp/project"),
+                created_at: None,
+                updated_at: None,
+                source_path: None,
+                preview: None,
+                removable: None,
+                resume_hint: None,
+            },
+        ];
+        let filters =
+            ListFilters::new(vec!["FIX".to_string(), "parser".to_string()], Vec::new()).unwrap();
+
+        let matches = filter_threads(threads, &filters);
+
+        assert_eq!(
+            matches
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["abc123", "def456"]
+        );
+    }
+
+    #[test]
+    fn regex_filters_require_all_patterns() {
+        let threads = vec![
+            ThreadSummary {
+                agent: AgentKind::Codex,
+                id: "abc123".to_string(),
+                name: Some("search list rows".to_string()),
+                cwd: PathBuf::from("/tmp/lh"),
+                created_at: None,
+                updated_at: None,
+                source_path: Some(PathBuf::from("/tmp/lh/src/main.rs")),
+                preview: None,
+                removable: None,
+                resume_hint: None,
+            },
+            ThreadSummary {
+                agent: AgentKind::Codex,
+                id: "def456".to_string(),
+                name: Some("search docs".to_string()),
+                cwd: PathBuf::from("/tmp/lh"),
+                created_at: None,
+                updated_at: None,
+                source_path: Some(PathBuf::from("/tmp/lh/README.md")),
+                preview: None,
+                removable: None,
+                resume_hint: None,
+            },
+        ];
+        let filters = ListFilters::new(
+            Vec::new(),
+            vec!["search".to_string(), r"src/.*\.rs".to_string()],
+        )
+        .unwrap();
+
+        let matches = filter_threads(threads, &filters);
+
+        assert_eq!(
+            matches
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["abc123"]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_list_regex() {
+        let error = ListFilters::new(Vec::new(), vec!["[".to_string()]).unwrap_err();
+
+        assert!(error.to_string().starts_with("invalid regex '[':"));
     }
 
     #[test]
