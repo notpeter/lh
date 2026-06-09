@@ -6,6 +6,7 @@ use crate::codex::CodexProvider;
 use crate::common::{AgentKind, AgentProvider, LhResult, MemoryFile, ThreadSummary};
 use crate::gemini::GeminiProvider;
 use crate::opencode::OpenCodeProvider;
+use crate::zed::ZedProvider;
 
 pub fn all() -> Vec<Box<dyn AgentProvider>> {
     vec![
@@ -13,6 +14,7 @@ pub fn all() -> Vec<Box<dyn AgentProvider>> {
         Box::new(CodexProvider::new()),
         Box::new(OpenCodeProvider::new()),
         Box::new(GeminiProvider::new()),
+        Box::new(ZedProvider::new()),
     ]
 }
 
@@ -22,6 +24,7 @@ pub fn by_kind(kind: AgentKind) -> Box<dyn AgentProvider> {
         AgentKind::Codex => Box::new(CodexProvider::new()),
         AgentKind::OpenCode => Box::new(OpenCodeProvider::new()),
         AgentKind::Gemini => Box::new(GeminiProvider::new()),
+        AgentKind::Zed => Box::new(ZedProvider::new()),
     }
 }
 

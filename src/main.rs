@@ -9,6 +9,7 @@ mod opencode;
 mod prices;
 mod providers;
 mod util;
+mod zed;
 
 use std::ffi::OsString;
 use std::fmt;

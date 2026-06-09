@@ -16,6 +16,7 @@ pub enum AgentKind {
     Codex,
     OpenCode,
     Gemini,
+    Zed,
 }
 
 impl AgentKind {
@@ -25,6 +26,7 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::OpenCode => "opencode",
             AgentKind::Gemini => "gemini",
+            AgentKind::Zed => "zed",
         }
     }
 
@@ -34,6 +36,7 @@ impl AgentKind {
             AgentKind::Codex => "Codex",
             AgentKind::OpenCode => "OpenCode",
             AgentKind::Gemini => "Gemini",
+            AgentKind::Zed => "Zed",
         }
     }
 
@@ -43,6 +46,7 @@ impl AgentKind {
             "codex" | "openai-codex" | "openai" => Some(Self::Codex),
             "opencode" | "open-code" | "oc" => Some(Self::OpenCode),
             "gemini" | "gemini-cli" | "google-gemini" => Some(Self::Gemini),
+            "zed" | "zed-agent" => Some(Self::Zed),
             _ => None,
         }
     }
