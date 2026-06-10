@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::Value;
 
 use crate::common::{
@@ -9,7 +9,8 @@ use crate::common::{
     default_executable,
 };
 use crate::util::{
-    canonicalize_existing, find_executable, home_dir, millis_to_time, path_is_at_or_under,
+    canonicalize_existing, find_executable, first_model_string_at_paths, home_dir, millis_to_time,
+    model_string, path_is_at_or_under,
 };
 
 pub struct OpenCodeProvider {
@@ -130,6 +131,10 @@ impl OpenCodeProvider {
             let created_ms: i64 = row.get(4)?;
             let updated_ms: i64 = row.get(5)?;
             let worktree: Option<String> = row.get(6).ok();
+            let model = session_model(&conn, &id)
+                .ok()
+                .flatten()
+                .or_else(|| first_model(&conn, &id).ok().flatten());
 
             let directory_path = PathBuf::from(&directory);
             let worktree_path = worktree.as_deref().map(PathBuf::from);
@@ -167,6 +172,7 @@ impl OpenCodeProvider {
                 agent: AgentKind::OpenCode,
                 id,
                 name: Some(if title.trim().is_empty() { slug } else { title }),
+                model,
                 cwd: thread_cwd,
                 created_at: millis_to_time(created_ms),
                 updated_at: millis_to_time(updated_ms),
@@ -180,6 +186,85 @@ impl OpenCodeProvider {
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
         Ok(threads)
     }
+}
+
+fn session_model(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<String>> {
+    let columns = table_columns(conn, "session")?;
+    for candidate in ["model", "model_id", "modelID", "modelId"] {
+        let Some(column) = columns
+            .iter()
+            .find(|column| column.eq_ignore_ascii_case(candidate))
+        else {
+            continue;
+        };
+        let escaped = column.replace('"', "\"\"");
+        let sql = format!("select \"{escaped}\" from session where id = ?1 limit 1");
+        let model = conn
+            .query_row(&sql, params![session_id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten()
+            .and_then(|value| model_string(&Value::String(value)));
+        if model.is_some() {
+            return Ok(model);
+        }
+    }
+    Ok(None)
+}
+
+fn table_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next()? {
+        columns.push(row.get(1)?);
+    }
+    Ok(columns)
+}
+
+fn first_model(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "select m.data
+         from message m
+         where m.session_id = ?1
+         order by m.time_created asc",
+    )?;
+    let mut rows = stmt.query(params![session_id])?;
+    while let Some(row) = rows.next()? {
+        let data: String = row.get(0)?;
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        if let Some(model) = opencode_model_from_json(&value) {
+            return Ok(Some(model));
+        }
+    }
+    Ok(None)
+}
+
+fn opencode_model_from_json(value: &Value) -> Option<String> {
+    first_model_string_at_paths(
+        value,
+        &[
+            &["model"],
+            &["modelID"],
+            &["modelId"],
+            &["model_id"],
+            &["model", "id"],
+            &["model", "name"],
+            &["model", "model"],
+            &["model", "modelID"],
+            &["model", "modelId"],
+            &["model", "model_id"],
+            &["request", "model"],
+            &["request", "modelID"],
+            &["request", "modelId"],
+            &["metadata", "model"],
+            &["metadata", "modelID"],
+            &["metadata", "modelId"],
+        ],
+    )
 }
 
 fn first_text_part(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<String>> {
@@ -247,7 +332,7 @@ mod tests {
         let conn = Connection::open(db_dir.join("opencode.db")).unwrap();
         conn.execute_batch(
             "create table project (id text primary key, worktree text not null);
-             create table session (id text primary key, project_id text not null, slug text not null, title text not null, directory text not null, time_created integer not null, time_updated integer not null);
+             create table session (id text primary key, project_id text not null, slug text not null, title text not null, directory text not null, time_created integer not null, time_updated integer not null, model text);
              create table message (id text primary key, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);
              create table part (id text primary key, message_id text not null, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);",
         )
@@ -258,12 +343,12 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "insert into session values ('s', 'p', 'slug', 'Title', ?1, 1000, 2000)",
+            "insert into session values ('s', 'p', 'slug', 'Title', ?1, 1000, 2000, '{\"id\":\"big-pickle\",\"providerID\":\"opencode\"}')",
             params![cwd.to_string_lossy()],
         )
         .unwrap();
         conn.execute(
-            "insert into message values ('m', 's', 1000, 1000, '{}')",
+            "insert into message values ('m', 's', 1000, 1000, '{\"model\":{\"providerID\":\"opencode\",\"modelID\":\"big-pickle\"}}')",
             [],
         )
         .unwrap();
@@ -278,6 +363,7 @@ mod tests {
             .unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name.as_deref(), Some("Title"));
+        assert_eq!(threads[0].model.as_deref(), Some("big-pickle"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello opencode"));
     }
 

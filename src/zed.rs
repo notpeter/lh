@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::common::{
     AgentKind, AgentProvider, LaunchCommand, LhResult, ThreadSummary, default_executable,
 };
+use crate::util::first_model_string_at_paths;
 use crate::util::{canonicalize_existing, home_dir, parse_time, path_is_at_or_under};
 
 pub struct ZedProvider {
@@ -151,6 +152,7 @@ impl ZedProvider {
             let data_type: String = row.get(7)?;
             let data: Vec<u8> = row.get(8)?;
             let preview = first_zed_text(&data_type, &data);
+            let model = zed_model(&data_type, &data);
             let cwd = canonical_paths
                 .first()
                 .cloned()
@@ -160,6 +162,7 @@ impl ZedProvider {
                 agent: AgentKind::Zed,
                 id,
                 name: (!summary.trim().is_empty()).then_some(summary),
+                model,
                 cwd,
                 created_at: created_at.as_deref().and_then(parse_time),
                 updated_at: parse_time(&updated_at),
@@ -222,6 +225,35 @@ fn first_zed_text(data_type: &str, data: &[u8]) -> Option<String> {
         .as_array()?
         .iter()
         .find_map(first_text_in_message)
+}
+
+fn zed_model(data_type: &str, data: &[u8]) -> Option<String> {
+    let value = zed_thread_json(data_type, data).ok()?;
+    model_from_zed_value(&value).or_else(|| {
+        value
+            .get("messages")?
+            .as_array()?
+            .iter()
+            .find_map(|message| message.get("Agent").and_then(model_from_zed_value))
+    })
+}
+
+fn model_from_zed_value(value: &Value) -> Option<String> {
+    first_model_string_at_paths(
+        value,
+        &[
+            &["model"],
+            &["model_id"],
+            &["modelId"],
+            &["modelID"],
+            &["model", "id"],
+            &["model", "name"],
+            &["model", "model"],
+            &["model", "model_id"],
+            &["model", "modelId"],
+            &["model", "modelID"],
+        ],
+    )
 }
 
 fn zed_thread_json(data_type: &str, data: &[u8]) -> LhResult<Value> {
@@ -449,6 +481,7 @@ mod tests {
         assert_eq!(threads[0].agent, AgentKind::Zed);
         assert_eq!(threads[0].id, "zed-1");
         assert_eq!(threads[0].name.as_deref(), Some("Zed title"));
+        assert_eq!(threads[0].model.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello zed"));
         assert_eq!(threads[0].cwd, canonicalize_existing(&cwd));
     }
@@ -538,6 +571,7 @@ mod tests {
         let value = serde_json::json!({
             "version": "0.3.0",
             "title": "Zed title",
+            "model": { "id": "claude-sonnet-4-5" },
             "updated_at": "2026-05-01T00:05:00Z",
             "messages": [
                 {

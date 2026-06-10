@@ -9,7 +9,8 @@ use crate::common::{
     ThreadSummary, default_executable, markdown_memory_file,
 };
 use crate::util::{
-    canonicalize_existing, collect_files, home_dir, parse_time, path_is_at_or_under, read_to_string,
+    canonicalize_existing, collect_files, first_model_string_at_paths, home_dir, parse_time,
+    path_is_at_or_under, read_to_string,
 };
 
 pub struct GeminiProvider {
@@ -272,12 +273,14 @@ fn parse_gemini_chat(
         .and_then(parse_time)
         .or(created_at);
     let mut preview = None;
+    let mut model = gemini_model_from_value(&value);
 
     if let Some(logs) = logs {
         for log in logs {
             if log.get("sessionId").and_then(|value| value.as_str()) != Some(id.as_str()) {
                 continue;
             }
+            model = model.or_else(|| gemini_model_from_value(log));
             if preview.is_none() && log.get("type").and_then(|value| value.as_str()) == Some("user")
             {
                 preview = log
@@ -305,6 +308,7 @@ fn parse_gemini_chat(
         name: preview
             .clone()
             .map(|value| crate::common::truncate(&value, 64)),
+        model,
         cwd: cwd.to_path_buf(),
         created_at,
         updated_at,
@@ -317,6 +321,20 @@ fn parse_gemini_chat(
         }),
         resume_hint: Some(ResumeHint::GeminiSessionFile(path.to_path_buf())),
     })
+}
+
+fn gemini_model_from_value(value: &Value) -> Option<String> {
+    first_model_string_at_paths(
+        value,
+        &[
+            &["model"],
+            &["model_id"],
+            &["modelId"],
+            &["modelName"],
+            &["model", "id"],
+            &["model", "name"],
+        ],
+    )
 }
 
 pub fn delete_gemini_files(
@@ -363,7 +381,7 @@ mod tests {
         .unwrap();
         fs::write(
             project.join("chats/session.jsonl"),
-            "{\"sessionId\":\"g\",\"startTime\":\"2026-05-01T00:00:00Z\",\"lastUpdated\":\"2026-05-01T00:00:00Z\"}\n",
+            "{\"sessionId\":\"g\",\"model\":\"gemini-2.5-pro\",\"startTime\":\"2026-05-01T00:00:00Z\",\"lastUpdated\":\"2026-05-01T00:00:00Z\"}\n",
         )
         .unwrap();
         fs::write(
@@ -374,6 +392,8 @@ mod tests {
 
         let threads = GeminiProvider::with_home(root).list_threads(&cwd).unwrap();
         assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "g");
+        assert_eq!(threads[0].model.as_deref(), Some("gemini-2.5-pro"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello gemini"));
     }
 

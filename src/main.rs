@@ -49,7 +49,7 @@ enum Commands {
             value_name = "FIELDS",
             value_delimiter = ',',
             num_args = 1..,
-            help = "Columns to show, comma-separated or repeated"
+            help = "Columns to show, comma-separated or repeated: updated, created, agent, id, model, dir, cwd, name, preview, source"
         )]
         output: Vec<String>,
         #[arg(
@@ -422,6 +422,9 @@ fn thread_search_text(thread: &ThreadSummary) -> String {
 
     if let Some(name) = &thread.name {
         fields.push(name.clone());
+    }
+    if let Some(model) = &thread.model {
+        fields.push(model.clone());
     }
     if let Some(preview) = &thread.preview {
         fields.push(preview.clone());
@@ -1274,6 +1277,7 @@ enum ListColumn {
     Created,
     Agent,
     Id,
+    Model,
     Dir,
     Name,
     Preview,
@@ -1289,6 +1293,7 @@ impl ListColumn {
             "created" | "created_at" => Some(Self::Created),
             "agent" => Some(Self::Agent),
             "id" => Some(Self::Id),
+            "model" => Some(Self::Model),
             "dir" | "cwd" => Some(Self::Dir),
             "name" | "title" => Some(Self::Name),
             "preview" => Some(Self::Preview),
@@ -1310,6 +1315,7 @@ impl ListColumn {
                 .unwrap_or_else(|| "-".to_string()),
             Self::Agent => thread.agent.as_str().to_string(),
             Self::Id => thread.id.clone(),
+            Self::Model => thread.model.clone().unwrap_or_else(|| "-".to_string()),
             Self::Dir => shorten_path(&thread.cwd),
             Self::Name => thread_list_name(thread),
             Self::Preview => thread.preview.clone().unwrap_or_else(|| "-".to_string()),
@@ -1331,6 +1337,12 @@ impl ListColumn {
                 10,
             ),
             Self::Id => bounded_column_width(threads.iter().map(|thread| thread.id.clone()), 36),
+            Self::Model => bounded_column_width(
+                threads
+                    .iter()
+                    .map(|thread| thread.model.clone().unwrap_or_else(|| "-".to_string())),
+                32,
+            ),
             Self::Dir => {
                 bounded_column_width(threads.iter().map(|thread| shorten_path(&thread.cwd)), 30)
             }
@@ -1368,7 +1380,7 @@ fn parse_list_columns(values: &[String]) -> LhResult<Vec<ListColumn>> {
         }
         let Some(column) = ListColumn::parse(value) else {
             return Err(format!(
-                "unknown list column '{value}'; expected one of updated, created, agent, id, dir, cwd, name, preview, source"
+                "unknown list column '{value}'; expected one of updated, created, agent, id, model, dir, cwd, name, preview, source"
             )
             .into());
         };
@@ -1463,6 +1475,10 @@ fn print_thread_info(provider: &dyn AgentProvider, thread: &ThreadSummary) -> Lh
 
     field("Agent", thread.agent.display_name().to_string())?;
     field("ID", thread.id.clone())?;
+    field(
+        "Model",
+        thread.model.clone().unwrap_or_else(|| "-".to_string()),
+    )?;
     field(
         "Name",
         thread.name.clone().unwrap_or_else(|| "<unset>".to_string()),
@@ -2063,6 +2079,7 @@ mod tests {
             agent: AgentKind::OpenCode,
             id: "ses_196465859ffeQn1sT67NGi5Pof".to_string(),
             name: Some("adding-mit-license-to-cargo-toml".to_string()),
+            model: None,
             cwd: PathBuf::from("/tmp"),
             created_at: None,
             updated_at: None,
@@ -2075,6 +2092,7 @@ mod tests {
             agent: AgentKind::Codex,
             id: "019e69d6-1fae-7052-b26c-71824873dae7".to_string(),
             name: Some("create-llm-history-lh-cli".to_string()),
+            model: None,
             cwd: PathBuf::from("/tmp"),
             created_at: None,
             updated_at: None,
@@ -2096,6 +2114,7 @@ mod tests {
             agent: AgentKind::Codex,
             id: "abc123".to_string(),
             name: Some("short thread".to_string()),
+            model: None,
             cwd: PathBuf::from("/tmp"),
             created_at: None,
             updated_at: None,
@@ -2122,6 +2141,7 @@ mod tests {
             agent: AgentKind::OpenCode,
             id: "x".repeat(80),
             name: None,
+            model: None,
             cwd: PathBuf::from("/a/very/long/path/that/should/not/consume/the/name/column"),
             created_at: None,
             updated_at: None,
@@ -2163,7 +2183,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unknown list column 'bogus'; expected one of updated, created, agent, id, dir, cwd, name, preview, source"
+            "unknown list column 'bogus'; expected one of updated, created, agent, id, model, dir, cwd, name, preview, source"
         );
     }
 
@@ -2173,6 +2193,7 @@ mod tests {
             agent: AgentKind::Codex,
             id: "abc123".to_string(),
             name: Some("short thread".to_string()),
+            model: Some("gpt-5-codex".to_string()),
             cwd: PathBuf::from("/tmp"),
             created_at: None,
             updated_at: None,
@@ -2185,9 +2206,14 @@ mod tests {
         assert_eq!(
             format_threads(
                 &[thread],
-                &[ListColumn::Agent, ListColumn::Id, ListColumn::Name]
+                &[
+                    ListColumn::Agent,
+                    ListColumn::Model,
+                    ListColumn::Id,
+                    ListColumn::Name,
+                ]
             ),
-            "codex abc123 short thread\n"
+            "codex gpt-5-codex abc123 short thread\n"
         );
     }
 
@@ -2198,6 +2224,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 id: "abc123".to_string(),
                 name: Some("Fix Parser".to_string()),
+                model: Some("gpt-5-codex".to_string()),
                 cwd: PathBuf::from("/tmp/project"),
                 created_at: None,
                 updated_at: None,
@@ -2210,6 +2237,7 @@ mod tests {
                 agent: AgentKind::Claude,
                 id: "def456".to_string(),
                 name: Some("Fix formatter".to_string()),
+                model: None,
                 cwd: PathBuf::from("/tmp/project"),
                 created_at: None,
                 updated_at: None,
@@ -2222,6 +2250,7 @@ mod tests {
                 agent: AgentKind::OpenCode,
                 id: "ghi789".to_string(),
                 name: Some("Parser cleanup".to_string()),
+                model: None,
                 cwd: PathBuf::from("/tmp/project"),
                 created_at: None,
                 updated_at: None,
@@ -2252,6 +2281,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 id: "abc123".to_string(),
                 name: Some("search list rows".to_string()),
+                model: None,
                 cwd: PathBuf::from("/tmp/lh"),
                 created_at: None,
                 updated_at: None,
@@ -2264,6 +2294,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 id: "def456".to_string(),
                 name: Some("search docs".to_string()),
+                model: None,
                 cwd: PathBuf::from("/tmp/lh"),
                 created_at: None,
                 updated_at: None,
@@ -2309,6 +2340,7 @@ mod tests {
             agent: AgentKind::Codex,
             id: "abc123".to_string(),
             name: None,
+            model: None,
             cwd: PathBuf::from("/tmp"),
             created_at: None,
             updated_at: None,
@@ -2327,6 +2359,7 @@ mod tests {
             agent: AgentKind::Claude,
             id: "abc123".to_string(),
             name: None,
+            model: None,
             cwd: PathBuf::from("/tmp"),
             created_at: None,
             updated_at: None,
@@ -2345,6 +2378,7 @@ mod tests {
             agent: AgentKind::Codex,
             id: "abc123".to_string(),
             name: None,
+            model: None,
             cwd: PathBuf::from("/tmp/other clone"),
             created_at: None,
             updated_at: None,

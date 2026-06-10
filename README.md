@@ -44,7 +44,7 @@ when stdout is piped, it prints directly. Use `-5`, `-10`, or any other numeric
 shorthand to limit the row count.
 Use `-o`/`--output` to choose list columns. Fields can be comma-separated or
 repeated, and supported fields are `updated`, `created`, `agent`, `id`, `dir`,
-`cwd`, `name`, `preview`, and `source`.
+`cwd`, `model`, `name`, `preview`, and `source`.
 `lh info` prints full details for a selected thread, including its source path.
 `lh rename` updates the native agent title for providers with known writable
 title storage. `lh rename [thread-id] --auto` uses the optional `[llm]` config:

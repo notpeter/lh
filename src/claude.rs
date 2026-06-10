@@ -13,8 +13,8 @@ use crate::common::{
     default_executable, markdown_memory_file,
 };
 use crate::util::{
-    canonicalize_existing, first_json_text, format_time, home_dir, is_noise_preview_text,
-    parse_time, path_is_at_or_under,
+    canonicalize_existing, first_json_text, first_model_string_at_paths, format_time, home_dir,
+    is_noise_preview_text, parse_time, path_is_at_or_under,
 };
 
 pub struct ClaudeProvider {
@@ -300,11 +300,13 @@ fn parse_claude_jsonl(
     let mut preview = None;
     let mut custom_title = None;
     let mut cwd_from_file = None;
+    let mut model = None;
 
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        model = model.or_else(|| claude_model_from_event(&value));
 
         if id.is_none() {
             id = value
@@ -384,6 +386,7 @@ fn parse_claude_jsonl(
         agent: AgentKind::Claude,
         id,
         name,
+        model,
         cwd,
         created_at,
         updated_at,
@@ -392,6 +395,22 @@ fn parse_claude_jsonl(
         removable: Some(RemovalTarget::File(path.to_path_buf())),
         resume_hint: None,
     })
+}
+
+fn claude_model_from_event(value: &Value) -> Option<String> {
+    first_model_string_at_paths(
+        value,
+        &[
+            &["message", "model"],
+            &["message", "model_id"],
+            &["message", "modelId"],
+            &["message", "modelName"],
+            &["model"],
+            &["model_id"],
+            &["modelId"],
+            &["modelName"],
+        ],
+    )
 }
 
 fn read_session_names(sessions_dir: &Path) -> HashMap<String, String> {
@@ -537,7 +556,8 @@ mod tests {
         fs::write(
             project_dir.join("abc.jsonl"),
             format!(
-                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello claude\"}}}}\n",
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello claude\"}}}}\n{{\"type\":\"assistant\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:01:00Z\",\"message\":{{\"model\":\"claude-sonnet-4-5\",\"content\":[{{\"type\":\"text\",\"text\":\"hi\"}}]}}}}\n",
+                cwd.display(),
                 cwd.display()
             ),
         )
@@ -547,6 +567,7 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "abc");
         assert_eq!(threads[0].name.as_deref(), Some("named claude"));
+        assert_eq!(threads[0].model.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello claude"));
     }
 

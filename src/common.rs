@@ -63,6 +63,7 @@ pub struct ThreadSummary {
     pub agent: AgentKind,
     pub id: String,
     pub name: Option<String>,
+    pub model: Option<String>,
     pub cwd: PathBuf,
     pub created_at: Option<OffsetDateTime>,
     pub updated_at: Option<OffsetDateTime>,

@@ -13,7 +13,8 @@ use crate::common::{
 };
 use crate::util::{
     canonicalize_existing, collect_files, collect_files_with_name_prefix, first_json_text,
-    format_time, home_dir, is_noise_preview_text, parse_time, path_is_at_or_under,
+    first_model_string_at_paths, format_time, home_dir, is_noise_preview_text, parse_time,
+    path_is_at_or_under,
 };
 
 pub struct CodexProvider {
@@ -203,11 +204,13 @@ fn parse_codex_rollout(
     let mut created_at = None;
     let mut updated_at = None;
     let mut preview = None;
+    let mut model = None;
 
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        model = model.or_else(|| codex_model_from_event(&value));
 
         let timestamp = value
             .get("timestamp")
@@ -259,6 +262,7 @@ fn parse_codex_rollout(
         agent: AgentKind::Codex,
         id: id.clone(),
         name: names.get(&id).cloned(),
+        model,
         cwd,
         created_at,
         updated_at,
@@ -267,6 +271,21 @@ fn parse_codex_rollout(
         removable: Some(RemovalTarget::File(path.to_path_buf())),
         resume_hint: None,
     })
+}
+
+fn codex_model_from_event(value: &Value) -> Option<String> {
+    let payload = value.get("payload").unwrap_or(value);
+    first_model_string_at_paths(
+        payload,
+        &[
+            &["model"],
+            &["model_id"],
+            &["modelId"],
+            &["modelID"],
+            &["model", "id"],
+            &["model", "name"],
+        ],
+    )
 }
 
 fn codex_user_text(value: &Value) -> Option<String> {
@@ -347,7 +366,7 @@ mod tests {
         fs::write(
             root.join(".codex/sessions/2026/05/27/rollout-test.jsonl"),
             format!(
-                "{{\"timestamp\":\"2026-05-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"abc\",\"cwd\":\"{}\"}}}}\n{{\"timestamp\":\"2026-05-01T00:01:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"hello codex\"}}}}\n",
+                "{{\"timestamp\":\"2026-05-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"abc\",\"cwd\":\"{}\"}}}}\n{{\"timestamp\":\"2026-05-01T00:00:30Z\",\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-5-codex\"}}}}\n{{\"timestamp\":\"2026-05-01T00:01:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"hello codex\"}}}}\n",
                 cwd.display()
             ),
         )
@@ -356,6 +375,7 @@ mod tests {
         let threads = CodexProvider::with_home(root).list_threads(&cwd).unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name.as_deref(), Some("named codex"));
+        assert_eq!(threads[0].model.as_deref(), Some("gpt-5-codex"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello codex"));
     }
 

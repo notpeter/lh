@@ -183,6 +183,43 @@ pub fn first_json_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+pub fn model_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            if trimmed.starts_with('{')
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+                && let Some(model) = model_string(&value)
+            {
+                return Some(model);
+            }
+            Some(trimmed.to_string())
+        }
+        serde_json::Value::Object(map) => ["id", "modelID", "modelId", "model_id", "name"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(model_string))
+            .or_else(|| map.get("model").and_then(model_string)),
+        _ => None,
+    }
+}
+
+pub fn model_string_at_path(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let mut value = value;
+    for key in path {
+        value = value.get(*key)?;
+    }
+    model_string(value)
+}
+
+pub fn first_model_string_at_paths(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
+    paths
+        .iter()
+        .find_map(|path| model_string_at_path(value, path))
+}
+
 pub fn is_noise_preview_text(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with("# AGENTS.md instructions for ")
