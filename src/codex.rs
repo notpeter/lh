@@ -144,6 +144,31 @@ impl AgentProvider for CodexProvider {
         Ok(())
     }
 
+    fn supports_move_thread(&self) -> bool {
+        true
+    }
+
+    fn move_thread(&self, thread: &ThreadSummary, target_cwd: &Path) -> LhResult<()> {
+        let path = thread
+            .source_path
+            .as_ref()
+            .ok_or("Codex thread is missing its rollout path")?;
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "timestamp": format_time(OffsetDateTime::now_utc()),
+                "type": "session_meta",
+                "payload": {
+                    "id": thread.id,
+                    "cwd": target_cwd,
+                },
+            })
+        )?;
+        Ok(())
+    }
+
     fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
         let path = thread
             .source_path
@@ -492,5 +517,32 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "child");
         assert_eq!(threads[0].cwd, canonicalize_existing(&child));
+    }
+
+    #[test]
+    fn moves_codex_thread_to_target_cwd() {
+        let root = temp_dir("codex-move");
+        let cwd = root.join("work");
+        let target = root.join("target");
+        fs::create_dir_all(root.join(".codex/sessions/2026/05/27")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            root.join(".codex/sessions/2026/05/27/rollout-test.jsonl"),
+            format!(
+                "{{\"timestamp\":\"2026-05-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"abc\",\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        let provider = CodexProvider::with_home(root);
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.move_thread(&thread, &target).unwrap();
+
+        assert!(provider.list_threads(&cwd).unwrap().is_empty());
+        let moved = provider.list_threads(&target).unwrap().remove(0);
+        assert_eq!(moved.id, "abc");
+        assert_eq!(moved.cwd, canonicalize_existing(&target));
     }
 }

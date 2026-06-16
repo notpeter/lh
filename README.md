@@ -29,6 +29,8 @@ lh resume [agent] [name-or-id]
 lh rename [thread-id] [new-name]
 lh rename [thread-id] --auto
 lh rename [thread-id] --auto --dry-run
+lh mv -g <name-or-id> [dir]
+lh mv <agent> <name-or-id> [dir]
 lh remove <name-or-id> --dry-run
 lh remove <agent> <name-or-id> --force
 ```
@@ -47,7 +49,9 @@ repeated, and supported fields are `updated`, `created`, `agent`, `id`, `dir`,
 `cwd`, `model`, `name`, `preview`, and `source`.
 `lh info` prints full details for a selected thread, including its source path.
 `lh rename` updates the native agent title for providers with known writable
-title storage. `lh rename [thread-id] --auto` uses the optional `[llm]` config:
+title storage. `lh mv` reattaches a selected thread to another directory; omit
+`dir` to use the current directory. `lh rename [thread-id] --auto` uses the
+optional `[llm]` config:
 
 ```toml
 [llm]

@@ -102,6 +102,43 @@ impl AgentProvider for OpenCodeProvider {
         Ok(())
     }
 
+    fn supports_move_thread(&self) -> bool {
+        true
+    }
+
+    fn move_thread(&self, thread: &ThreadSummary, target_cwd: &Path) -> LhResult<()> {
+        let conn = Connection::open(self.db_path())?;
+        let project_id: String = conn.query_row(
+            "select project_id from session where id = ?1",
+            params![thread.id],
+            |row| row.get(0),
+        )?;
+        let project_session_count: i64 = conn.query_row(
+            "select count(*) from session where project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+        if project_session_count > 1 {
+            return Err(
+                "OpenCode move is not supported for sessions sharing a project record".into(),
+            );
+        }
+
+        let target = target_cwd.display().to_string();
+        let changed = conn.execute(
+            "update session set directory = ?1 where id = ?2",
+            params![target, thread.id],
+        )?;
+        if changed == 0 {
+            return Err(format!("OpenCode session not found: {}", thread.id).into());
+        }
+        conn.execute(
+            "update project set worktree = ?1 where id = ?2",
+            params![target, project_id],
+        )?;
+        Ok(())
+    }
+
     fn thread_content(&self, thread: &ThreadSummary) -> LhResult<String> {
         let conn = Connection::open_with_flags(self.db_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Ok(text_parts(&conn, &thread.id)?.join("\n\n"))
@@ -467,5 +504,43 @@ mod tests {
             .unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].cwd, canonicalize_existing(&child));
+    }
+
+    #[test]
+    fn moves_opencode_thread_to_target_cwd() {
+        let root = temp_dir("opencode-move");
+        let cwd = root.join("work");
+        let target = root.join("target");
+        let db_dir = root.join(".local/share/opencode");
+        fs::create_dir_all(&db_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let conn = Connection::open(db_dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "create table project (id text primary key, worktree text not null);
+             create table session (id text primary key, project_id text not null, slug text not null, title text not null, directory text not null, time_created integer not null, time_updated integer not null);
+             create table message (id text primary key, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);
+             create table part (id text primary key, message_id text not null, session_id text not null, time_created integer not null, time_updated integer not null, data text not null);",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into project values ('p', ?1)",
+            params![cwd.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into session values ('s', 'p', 'slug', 'Title', ?1, 1000, 2000)",
+            params![cwd.to_string_lossy()],
+        )
+        .unwrap();
+        let provider = OpenCodeProvider::with_home(root);
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.move_thread(&thread, &target).unwrap();
+
+        assert!(provider.list_threads(&cwd).unwrap().is_empty());
+        let moved = provider.list_threads(&target).unwrap().remove(0);
+        assert_eq!(moved.id, "s");
+        assert_eq!(moved.cwd, canonicalize_existing(&target));
     }
 }

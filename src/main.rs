@@ -109,6 +109,33 @@ enum Commands {
         )]
         dry_run: bool,
     },
+    #[command(about = "Reattach a thread to another directory")]
+    #[command(alias = "mv", arg_required_else_help = true)]
+    Move {
+        #[arg(short = 'g', long = "global", help = "Search all known agent history")]
+        global: bool,
+        #[arg(
+            value_name = "TARGET",
+            help = "Thread name/id to move, or agent when followed by NAME-OR-ID"
+        )]
+        target: String,
+        #[arg(
+            value_name = "NAME-OR-DIR",
+            help = "Thread name/id for agent-qualified moves, or destination directory"
+        )]
+        name_or_dir: Option<String>,
+        #[arg(
+            value_name = "DIR",
+            help = "Destination directory for agent-qualified moves"
+        )]
+        dir: Option<PathBuf>,
+        #[arg(
+            short = 'n',
+            long,
+            help = "Print the proposed move without changing history"
+        )]
+        dry_run: bool,
+    },
     #[command(about = "Show full details for a selected thread")]
     Info {
         #[arg(short = 'g', long = "global", help = "Search all known agent history")]
@@ -240,6 +267,13 @@ fn run() -> LhResult<()> {
                 dry_run,
             },
         ),
+        Commands::Move {
+            global,
+            target,
+            name_or_dir,
+            dir,
+            dry_run,
+        } => move_thread(&cwd, global, target, name_or_dir, dir, dry_run),
         Commands::Info {
             global,
             agent_or_name,
@@ -500,7 +534,7 @@ fn is_global_arg(arg: &OsString) -> bool {
 fn global_flag_subcommand(arg: &str) -> bool {
     matches!(
         arg,
-        "list" | "ls" | "rename" | "info" | "memory" | "mem" | "remove" | "rm"
+        "list" | "ls" | "rename" | "move" | "mv" | "info" | "memory" | "mem" | "remove" | "rm"
     )
 }
 
@@ -671,6 +705,81 @@ fn parse_rename_mode(new_name: Option<String>, auto: bool, unset: bool) -> LhRes
         return Ok(RenameMode::Manual(validate_thread_name(&name)?));
     }
     Ok(RenameMode::Auto)
+}
+
+fn move_thread(
+    cwd: &Path,
+    global: bool,
+    target: String,
+    name_or_dir: Option<String>,
+    dir: Option<PathBuf>,
+    dry_run: bool,
+) -> LhResult<()> {
+    let (agent, query, target_dir) = parse_move_args(cwd, target, name_or_dir, dir)?;
+    let target_cwd = config::normalize_dir(cwd, &target_dir)?;
+    let (provider, thread) = select_provider_thread(cwd, global, agent, Some(&query))?;
+    let thread = thread.ok_or("no thread selected")?;
+    if !provider.supports_move_thread() {
+        return Err(format!("{} does not support native move", thread.agent).into());
+    }
+    if thread.cwd == target_cwd {
+        return Err(format!(
+            "{} {} is already attached to {}",
+            thread.agent,
+            thread.id,
+            target_cwd.display()
+        )
+        .into());
+    }
+
+    if dry_run {
+        outln!(
+            "would move {} {} from {} to {}",
+            thread.agent,
+            thread.id,
+            thread.cwd.display(),
+            target_cwd.display()
+        );
+        return Ok(());
+    }
+
+    provider.move_thread(&thread, &target_cwd)?;
+    outln!(
+        "moved {} {} from {} to {}",
+        thread.agent,
+        thread.id,
+        thread.cwd.display(),
+        target_cwd.display()
+    );
+    Ok(())
+}
+
+fn parse_move_args(
+    cwd: &Path,
+    target: String,
+    name_or_dir: Option<String>,
+    dir: Option<PathBuf>,
+) -> LhResult<(Option<AgentKind>, String, PathBuf)> {
+    if let Some(dir) = dir {
+        let agent = AgentKind::parse(&target)
+            .ok_or_else(|| format!("unknown agent '{target}' in three-argument move command"))?;
+        let query = name_or_dir.ok_or("move requires a thread name or id")?;
+        return Ok((Some(agent), query, dir));
+    }
+
+    if let Some(name_or_dir) = name_or_dir {
+        if let Some(agent) = AgentKind::parse(&target) {
+            return Ok((Some(agent), name_or_dir, cwd.to_path_buf()));
+        }
+        return Ok((None, target, PathBuf::from(name_or_dir)));
+    }
+
+    if AgentKind::parse(&target).is_some() {
+        return Err(
+            format!("move requires a thread name or id; '{target}' is an agent name").into(),
+        );
+    }
+    Ok((None, target, cwd.to_path_buf()))
 }
 
 fn info(
@@ -2071,6 +2180,70 @@ mod tests {
                 ..
             }) if target == "abc123"
         ));
+    }
+
+    #[test]
+    fn move_alias_parses_global_flag() {
+        let cli = Cli::try_parse_from(strings(&["lh", "mv", "-g", "abc123"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Move {
+                global: true,
+                target,
+                name_or_dir: None,
+                dir: None,
+                ..
+            }) if target == "abc123"
+        ));
+    }
+
+    #[test]
+    fn global_before_move_is_normalized() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-g", "mv", "abc123"])),
+            strings(&["lh", "mv", "-g", "abc123"])
+        );
+    }
+
+    #[test]
+    fn move_args_default_to_current_directory() {
+        assert_eq!(
+            parse_move_args(Path::new("/tmp/target"), "abc123".to_string(), None, None).unwrap(),
+            (None, "abc123".to_string(), PathBuf::from("/tmp/target"))
+        );
+    }
+
+    #[test]
+    fn move_args_accept_explicit_directory() {
+        assert_eq!(
+            parse_move_args(
+                Path::new("/tmp/current"),
+                "abc123".to_string(),
+                Some("../target".to_string()),
+                None
+            )
+            .unwrap(),
+            (None, "abc123".to_string(), PathBuf::from("../target"))
+        );
+    }
+
+    #[test]
+    fn move_args_accept_agent_selector() {
+        assert_eq!(
+            parse_move_args(
+                Path::new("/tmp/current"),
+                "codex".to_string(),
+                Some("abc123".to_string()),
+                Some(PathBuf::from("../target"))
+            )
+            .unwrap(),
+            (
+                Some(AgentKind::Codex),
+                "abc123".to_string(),
+                PathBuf::from("../target")
+            )
+        );
     }
 
     #[test]

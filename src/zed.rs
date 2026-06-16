@@ -105,6 +105,22 @@ impl AgentProvider for ZedProvider {
             stmt.query_row(params![thread.id], |row| Ok((row.get(0)?, row.get(1)?)))?;
         zed_thread_content(&data_type, &data)
     }
+
+    fn supports_move_thread(&self) -> bool {
+        true
+    }
+
+    fn move_thread(&self, thread: &ThreadSummary, target_cwd: &Path) -> LhResult<()> {
+        let conn = Connection::open(self.db_path())?;
+        let changed = conn.execute(
+            "update threads set folder_paths = ?1, folder_paths_order = '0' where id = ?2",
+            params![target_cwd.display().to_string(), thread.id],
+        )?;
+        if changed == 0 {
+            return Err(format!("Zed thread not found: {}", thread.id).into());
+        }
+        Ok(())
+    }
 }
 
 impl ZedProvider {
@@ -516,6 +532,38 @@ mod tests {
         let markdown = zed_thread_content("zstd", &data).unwrap();
         assert!(markdown.contains("## User\n\nhello zed"));
         assert!(markdown.contains("## Assistant\n\nhi back"));
+    }
+
+    #[test]
+    fn moves_zed_thread_to_target_cwd() {
+        let root = temp_dir("zed-move");
+        let cwd = root.join("project");
+        let target = root.join("target");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let provider = ZedProvider::with_home(root);
+        write_thread_db(
+            &provider.db_path(),
+            &[FixtureThread {
+                id: "zed-1",
+                summary: "Zed title",
+                folder_paths: Some(cwd.to_string_lossy().as_ref()),
+                folder_paths_order: Some("0"),
+                created_at: Some("2026-05-01T00:00:00Z"),
+                updated_at: "2026-05-01T00:05:00Z",
+                parent_id: None,
+                data_type: "zstd",
+                data: zstd_thread_data("hello zed"),
+            }],
+        );
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.move_thread(&thread, &target).unwrap();
+
+        assert!(provider.list_threads(&cwd).unwrap().is_empty());
+        let moved = provider.list_threads(&target).unwrap().remove(0);
+        assert_eq!(moved.id, "zed-1");
+        assert_eq!(moved.cwd, canonicalize_existing(&target));
     }
 
     struct FixtureThread<'a> {

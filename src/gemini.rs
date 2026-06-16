@@ -141,6 +141,37 @@ impl AgentProvider for GeminiProvider {
             [OsString::from("--resume"), OsString::from("latest")],
         ))
     }
+
+    fn supports_move_thread(&self) -> bool {
+        true
+    }
+
+    fn move_thread(&self, thread: &ThreadSummary, target_cwd: &Path) -> LhResult<()> {
+        let chat_path = thread
+            .source_path
+            .as_ref()
+            .ok_or("Gemini thread is missing its chat path")?;
+        let chats_dir = chat_path
+            .parent()
+            .ok_or("Gemini chat path is missing a parent directory")?;
+        let project_dir = chats_dir
+            .parent()
+            .ok_or("Gemini chat path is missing a project directory")?;
+        let chat_count = fs::read_dir(chats_dir)?
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+            .count();
+        if chat_count > 1 {
+            return Err(
+                "Gemini move is not supported for project directories with multiple chats".into(),
+            );
+        }
+        fs::write(
+            project_dir.join(".project_root"),
+            target_cwd.display().to_string(),
+        )?;
+        Ok(())
+    }
 }
 
 impl GeminiProvider {
@@ -437,5 +468,35 @@ mod tests {
         let threads = GeminiProvider::with_home(root).list_threads(&cwd).unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].cwd, canonicalize_existing(&child));
+    }
+
+    #[test]
+    fn moves_gemini_thread_to_target_cwd() {
+        let root = temp_dir("gemini-move");
+        let cwd = root.join("work");
+        let target = root.join("target");
+        let project = root.join(".gemini/tmp/lh");
+        fs::create_dir_all(project.join("chats")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            project.join(".project_root"),
+            cwd.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        fs::write(
+            project.join("chats/session.jsonl"),
+            "{\"sessionId\":\"g\",\"startTime\":\"2026-05-01T00:00:00Z\",\"lastUpdated\":\"2026-05-01T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        let provider = GeminiProvider::with_home(root);
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.move_thread(&thread, &target).unwrap();
+
+        assert!(provider.list_threads(&cwd).unwrap().is_empty());
+        let moved = provider.list_threads(&target).unwrap().remove(0);
+        assert_eq!(moved.id, "g");
+        assert_eq!(moved.cwd, canonicalize_existing(&target));
     }
 }

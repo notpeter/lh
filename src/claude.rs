@@ -31,8 +31,7 @@ impl ClaudeProvider {
         Self { home }
     }
 
-    #[cfg(test)]
-    pub fn project_dir_for(&self, cwd: &Path) -> PathBuf {
+    fn project_dir_for(&self, cwd: &Path) -> PathBuf {
         self.home
             .join(".claude/projects")
             .join(encode_project_path(&canonicalize_existing(cwd)))
@@ -227,6 +226,39 @@ impl AgentProvider for ClaudeProvider {
             })
         )?;
         set_session_name(&self.sessions_dir(), &thread.id, None)?;
+        Ok(())
+    }
+
+    fn supports_move_thread(&self) -> bool {
+        true
+    }
+
+    fn move_thread(&self, thread: &ThreadSummary, target_cwd: &Path) -> LhResult<()> {
+        let source_path = thread
+            .source_path
+            .as_ref()
+            .ok_or("Claude thread is missing its transcript path")?;
+        let target_dir = self.project_dir_for(target_cwd);
+        fs::create_dir_all(&target_dir)?;
+        let file_name = source_path
+            .file_name()
+            .ok_or("Claude thread transcript path is missing a file name")?;
+        let target_path = target_dir.join(file_name);
+        if source_path != &target_path && target_path.exists() {
+            return Err(format!(
+                "target Claude transcript already exists: {}",
+                target_path.display()
+            )
+            .into());
+        }
+
+        if source_path == &target_path {
+            rewrite_jsonl_cwd(source_path, target_cwd)?;
+        } else {
+            let rewritten = rewrite_jsonl_cwd_text(&fs::read_to_string(source_path)?, target_cwd)?;
+            fs::write(&target_path, rewritten)?;
+            fs::remove_file(source_path)?;
+        }
         Ok(())
     }
 
@@ -501,6 +533,36 @@ fn claude_thread_content(path: &Path) -> LhResult<String> {
     Ok(out.join("\n\n"))
 }
 
+fn rewrite_jsonl_cwd(path: &Path, cwd: &Path) -> LhResult<()> {
+    let text = fs::read_to_string(path)?;
+    fs::write(path, rewrite_jsonl_cwd_text(&text, cwd)?)?;
+    Ok(())
+}
+
+fn rewrite_jsonl_cwd_text(text: &str, cwd: &Path) -> LhResult<String> {
+    let cwd = cwd.display().to_string();
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            out.push('\n');
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(mut value) => {
+                if let Some(object) = value.as_object_mut()
+                    && object.contains_key("cwd")
+                {
+                    object.insert("cwd".to_string(), Value::String(cwd.clone()));
+                }
+                out.push_str(&serde_json::to_string(&value)?);
+            }
+            Err(_) => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 fn encode_project_path(path: &Path) -> String {
     path.to_string_lossy().replace('/', "-")
 }
@@ -773,5 +835,44 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "abc");
         assert_eq!(threads[0].cwd, canonicalize_existing(&child));
+    }
+
+    #[test]
+    fn moves_claude_thread_to_target_project_dir() {
+        let root = temp_dir("claude-move");
+        let cwd = root.join("work");
+        let target = root.join("target");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let provider = ClaudeProvider::with_home(root);
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello claude\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        let thread = provider.list_threads(&cwd).unwrap().remove(0);
+
+        provider.move_thread(&thread, &target).unwrap();
+
+        assert!(provider.list_threads(&cwd).unwrap().is_empty());
+        let moved = provider.list_threads(&target).unwrap().remove(0);
+        assert_eq!(moved.id, "abc");
+        assert_eq!(moved.cwd, canonicalize_existing(&target));
+        assert!(
+            thread
+                .source_path
+                .unwrap()
+                .parent()
+                .unwrap()
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 }
