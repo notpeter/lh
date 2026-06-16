@@ -13,6 +13,8 @@ lh ls
 lh ls -g
 lh ls -g -5
 lh ls -g -10
+lh ls --noalias
+lh ls --onlyalias
 lh ls -o updated,agent,id,dir,name
 lh info [agent] [name-or-id]
 lh info -g [agent] [name-or-id]
@@ -40,10 +42,12 @@ Agent aliases include `claude`, `claude-code`, `codex`, `opencode`, `open-code`,
 native stores.
 
 `lh ls` is scoped to the current directory. `lh ls -g` scans all known agent
-history. List output is unlimited by default and uses `$PAGER` or `less` when
-stdout is a terminal, with Git-style `LESS=FRX` defaults when `LESS` is unset;
-when stdout is piped, it prints directly. Use `-5`, `-10`, or any other numeric
-shorthand to limit the row count.
+history. By default, local listings include configured directory aliases. Use
+`lh ls --noalias` to list only the current directory, or `lh ls --onlyalias` to
+list aliases without the current directory. List output is unlimited by default
+and uses `$PAGER` or `less` when stdout is a terminal, with Git-style `LESS=FRX`
+defaults when `LESS` is unset; when stdout is piped, it prints directly. Use
+`-5`, `-10`, or any other numeric shorthand to limit the row count.
 Use `-o`/`--output` to choose list columns. Fields can be comma-separated or
 repeated, and supported fields are `updated`, `created`, `agent`, `id`, `dir`,
 `cwd`, `model`, `name`, `preview`, and `source`.

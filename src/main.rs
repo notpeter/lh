@@ -41,6 +41,18 @@ enum Commands {
     List {
         #[arg(short = 'g', long = "global", help = "Scan all known agent history")]
         global: bool,
+        #[arg(
+            long = "noalias",
+            conflicts_with = "onlyalias",
+            help = "Do not include configured directory aliases"
+        )]
+        noalias: bool,
+        #[arg(
+            long = "onlyalias",
+            conflicts_with = "noalias",
+            help = "List configured directory aliases without the current directory"
+        )]
+        onlyalias: bool,
         #[arg(long, value_name = "N", help = "Limit the number of rows shown")]
         limit: Option<usize>,
         #[arg(
@@ -226,6 +238,8 @@ fn run() -> LhResult<()> {
 
     match cli.command.unwrap_or(Commands::List {
         global: false,
+        noalias: false,
+        onlyalias: false,
         limit: None,
         output: Vec::new(),
         search: Vec::new(),
@@ -233,11 +247,24 @@ fn run() -> LhResult<()> {
     }) {
         Commands::List {
             global,
+            noalias,
+            onlyalias,
             limit,
             output,
             search,
             regex,
-        } => list(&cwd, global, limit, output, search, regex),
+        } => list(
+            &cwd,
+            ListRequest {
+                global,
+                noalias,
+                onlyalias,
+                limit,
+                output,
+                search,
+                regex,
+            },
+        ),
         Commands::New { agent, name } => new_thread(&cwd, agent, name),
         Commands::Resume {
             agent_or_name,
@@ -351,35 +378,38 @@ fn is_broken_pipe_error(mut error: &(dyn std::error::Error + 'static)) -> bool {
     }
 }
 
-fn list(
-    cwd: &Path,
+struct ListRequest {
     global: bool,
+    noalias: bool,
+    onlyalias: bool,
     limit: Option<usize>,
     output: Vec<String>,
     search: Vec<String>,
     regex: Vec<String>,
-) -> LhResult<()> {
-    let columns = parse_list_columns(&output)?;
-    let filters = ListFilters::new(search, regex)?;
-    let mut threads = if global {
+}
+
+fn list(cwd: &Path, request: ListRequest) -> LhResult<()> {
+    let columns = parse_list_columns(&request.output)?;
+    let filters = ListFilters::new(request.search, request.regex)?;
+    let mut threads = if request.global {
         providers::list_global()?
     } else {
-        let dirs = config::alias_group(cwd)?;
+        let dirs = list_dirs(cwd, request.noalias, request.onlyalias)?;
         providers::list_all_for_dirs(&dirs)?
     };
     threads = filter_threads(threads, &filters);
-    if let Some(limit) = limit {
+    if let Some(limit) = request.limit {
         threads.truncate(limit);
     }
 
     if threads.is_empty() {
         if !filters.is_empty() {
-            if global {
+            if request.global {
                 outln!("No matching threads found");
             } else {
                 outln!("No matching threads found for {}", cwd.display());
             }
-        } else if global {
+        } else if request.global {
             outln!("No threads found");
         } else {
             outln!("No threads found for {}", cwd.display());
@@ -388,6 +418,22 @@ fn list(
     }
     page_or_print(&format_threads(&threads, &columns))?;
     Ok(())
+}
+
+fn list_dirs(cwd: &Path, noalias: bool, onlyalias: bool) -> LhResult<Vec<PathBuf>> {
+    if noalias {
+        return Ok(vec![cwd.to_path_buf()]);
+    }
+
+    let mut dirs = config::alias_group(cwd)?;
+    apply_onlyalias(cwd, &mut dirs, onlyalias);
+    Ok(dirs)
+}
+
+fn apply_onlyalias(cwd: &Path, dirs: &mut Vec<PathBuf>, onlyalias: bool) {
+    if onlyalias {
+        dirs.retain(|dir| dir != cwd);
+    }
 }
 
 #[derive(Debug)]
@@ -522,7 +568,7 @@ fn is_list_shortcut_arg(arg: &OsString) -> bool {
     is_global_arg(arg)
         || matches!(
             value.as_ref(),
-            "--limit" | "-o" | "--output" | "--search" | "--regex"
+            "--noalias" | "--onlyalias" | "--limit" | "-o" | "--output" | "--search" | "--regex"
         )
 }
 
@@ -1844,6 +1890,22 @@ mod tests {
     }
 
     #[test]
+    fn inserts_default_list_for_noalias_flag() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "--noalias"])),
+            strings(&["lh", "list", "--noalias"])
+        );
+    }
+
+    #[test]
+    fn inserts_default_list_for_onlyalias_flag() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "--onlyalias"])),
+            strings(&["lh", "list", "--onlyalias"])
+        );
+    }
+
+    #[test]
     fn list_parses_output_columns() {
         let cli = Cli::try_parse_from(strings(&["lh", "ls", "-o", "agent,id", "name"])).unwrap();
 
@@ -1878,6 +1940,67 @@ mod tests {
                 if search == vec!["parser".to_string(), "codex".to_string()]
                     && regex == vec!["fix|repair".to_string(), "src/.*\\.rs".to_string()]
         ));
+    }
+
+    #[test]
+    fn list_parses_noalias_flag() {
+        let cli = Cli::try_parse_from(strings(&["lh", "ls", "--noalias"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::List { noalias: true, .. })
+        ));
+    }
+
+    #[test]
+    fn list_parses_onlyalias_flag() {
+        let cli = Cli::try_parse_from(strings(&["lh", "ls", "--onlyalias"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::List {
+                onlyalias: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn list_rejects_noalias_with_onlyalias() {
+        let result = Cli::try_parse_from(strings(&["lh", "ls", "--noalias", "--onlyalias"]));
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == clap::error::ErrorKind::ArgumentConflict
+        ));
+    }
+
+    #[test]
+    fn noalias_list_dirs_only_uses_current_directory() {
+        assert_eq!(
+            list_dirs(Path::new("/tmp/current"), true, false).unwrap(),
+            vec![PathBuf::from("/tmp/current")]
+        );
+    }
+
+    #[test]
+    fn onlyalias_removes_current_directory_from_alias_group() {
+        let cwd = Path::new("/tmp/current");
+        let mut dirs = vec![
+            PathBuf::from("/tmp/current"),
+            PathBuf::from("/tmp/alias-one"),
+            PathBuf::from("/tmp/alias-two"),
+        ];
+
+        apply_onlyalias(cwd, &mut dirs, true);
+
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/tmp/alias-one"),
+                PathBuf::from("/tmp/alias-two")
+            ]
+        );
     }
 
     #[test]
