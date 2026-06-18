@@ -28,6 +28,7 @@ lh agent ls
 
 lh new [agent] [name]
 lh resume [agent] [name-or-id]
+lh resume -g [agent] [name-or-id]
 lh rename [thread-id] [new-name]
 lh rename [thread-id] --auto
 lh rename [thread-id] --auto --dry-run

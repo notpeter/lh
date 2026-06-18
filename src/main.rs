@@ -111,10 +111,13 @@ enum Commands {
     },
     #[command(about = "Resume an existing agent thread")]
     Resume {
+        #[arg(short = 'g', long = "global", help = "Search all known agent history")]
+        global: bool,
         #[arg(
             short = 'C',
             long = "directory",
             value_name = "DIR",
+            conflicts_with = "global",
             help = "Search and resume from a specific directory"
         )]
         directory: Option<PathBuf>,
@@ -327,13 +330,14 @@ fn run() -> LhResult<()> {
             new_thread(&cwd, agent, name)
         }
         Commands::Resume {
+            global,
             directory,
             gui,
             agent_or_name,
             name,
         } => {
             let cwd = command_cwd(&cwd, directory)?;
-            resume(&cwd, gui, agent_or_name, name)
+            resume(&cwd, global, gui, agent_or_name, name)
         }
         Commands::Rename {
             global,
@@ -724,7 +728,17 @@ fn is_directory_arg_with_value(arg: &OsString) -> bool {
 fn global_flag_subcommand(arg: &str) -> bool {
     matches!(
         arg,
-        "list" | "ls" | "rename" | "move" | "mv" | "info" | "memory" | "mem" | "remove" | "rm"
+        "list"
+            | "ls"
+            | "resume"
+            | "rename"
+            | "move"
+            | "mv"
+            | "info"
+            | "memory"
+            | "mem"
+            | "remove"
+            | "rm"
     )
 }
 
@@ -765,12 +779,13 @@ fn new_thread(cwd: &Path, agent: Option<String>, name: Option<String>) -> LhResu
 
 fn resume(
     cwd: &Path,
+    global: bool,
     gui: bool,
     agent_or_name: Option<String>,
     name: Option<String>,
 ) -> LhResult<()> {
     let (agent, query) = parse_selector(agent_or_name, name)?;
-    let (provider, thread) = select_resume_provider_thread(cwd, agent, query.as_deref())?;
+    let (provider, thread) = select_resume_provider_thread(cwd, global, agent, query.as_deref())?;
     let mut command = if gui {
         let thread = thread
             .as_ref()
@@ -1363,12 +1378,15 @@ fn select_provider_thread(
 
 fn select_resume_provider_thread(
     cwd: &Path,
+    global: bool,
     agent: Option<AgentKind>,
     query: Option<&str>,
 ) -> LhResult<(Box<dyn AgentProvider>, Option<ThreadSummary>)> {
-    match select_provider_thread(cwd, false, agent, query) {
+    match select_provider_thread(cwd, global, agent, query) {
         Ok(selected) => Ok(selected),
-        Err(error) if query.is_some() && error.to_string() == "no matching thread found" => {
+        Err(error)
+            if !global && query.is_some() && error.to_string() == "no matching thread found" =>
+        {
             select_provider_thread(cwd, true, agent, query)
         }
         Err(error) => Err(error),
@@ -2087,6 +2105,14 @@ mod tests {
     }
 
     #[test]
+    fn moves_global_flag_in_front_of_resume() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-g", "resume", "abc123"])),
+            strings(&["lh", "resume", "-g", "abc123"])
+        );
+    }
+
+    #[test]
     fn inserts_default_list_for_noalias_flag() {
         assert_eq!(
             normalize_args(strings(&["lh", "--noalias"])),
@@ -2382,6 +2408,26 @@ mod tests {
                 name: Some(name),
                 ..
             }) if agent == "claude" && name == "Yoyoyo"
+        ));
+    }
+
+    #[test]
+    fn resume_parses_global_flag() {
+        let cli = Cli::try_parse_from(normalize_args(strings(&[
+            "lh",
+            "-g",
+            "resume",
+            "019edadc-383a-7662-98b9-b4ecfacafd0c",
+        ])))
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Resume {
+                global: true,
+                agent_or_name: Some(id),
+                ..
+            }) if id == "019edadc-383a-7662-98b9-b4ecfacafd0c"
         ));
     }
 
