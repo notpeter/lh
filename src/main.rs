@@ -42,6 +42,22 @@ enum Commands {
         #[arg(short = 'g', long = "global", help = "Scan all known agent history")]
         global: bool,
         #[arg(
+            short = 'C',
+            long = "directory",
+            value_name = "DIR",
+            conflicts_with = "global",
+            help = "Search threads for a specific directory"
+        )]
+        directory: Option<PathBuf>,
+        #[arg(
+            short = 'a',
+            long = "agent",
+            value_name = "AGENT",
+            value_parser = parse_agent_kind,
+            help = "Only list threads for one agent"
+        )]
+        agent: Option<AgentKind>,
+        #[arg(
             long = "noalias",
             conflicts_with = "onlyalias",
             help = "Do not include configured directory aliases"
@@ -81,6 +97,13 @@ enum Commands {
     },
     #[command(about = "Start a new agent thread")]
     New {
+        #[arg(
+            short = 'C',
+            long = "directory",
+            value_name = "DIR",
+            help = "Start the new thread in a specific directory"
+        )]
+        directory: Option<PathBuf>,
         #[arg(help = "Agent to launch, or the new thread name when used alone")]
         agent: Option<String>,
         #[arg(help = "Name for the new thread when AGENT is provided")]
@@ -88,6 +111,13 @@ enum Commands {
     },
     #[command(about = "Resume an existing agent thread")]
     Resume {
+        #[arg(
+            short = 'C',
+            long = "directory",
+            value_name = "DIR",
+            help = "Search and resume from a specific directory"
+        )]
+        directory: Option<PathBuf>,
         #[arg(long, help = "Resume the selected thread in its desktop app")]
         gui: bool,
         #[arg(help = "Thread name/id to resume, or agent when followed by NAME-OR-ID")]
@@ -99,6 +129,14 @@ enum Commands {
     Rename {
         #[arg(short = 'g', long = "global", help = "Search all known agent history")]
         global: bool,
+        #[arg(
+            short = 'C',
+            long = "directory",
+            value_name = "DIR",
+            conflicts_with = "global",
+            help = "Search threads for a specific directory"
+        )]
+        directory: Option<PathBuf>,
         #[arg(help = "Thread id to rename")]
         thread_id: String,
         #[arg(help = "New title for the selected thread")]
@@ -171,6 +209,13 @@ enum Commands {
     #[command(about = "Link the current directory with another checkout")]
     #[command(alias = "ln")]
     Alias {
+        #[arg(
+            short = 'C',
+            long = "directory",
+            value_name = "DIR",
+            help = "Use a specific directory as the alias source/current directory"
+        )]
+        directory: Option<PathBuf>,
         #[arg(short = 's', help = "Accepted for ln compatibility")]
         symbolic: bool,
         #[arg(short = 'd', long = "delete", help = "Remove directory aliases")]
@@ -240,6 +285,8 @@ fn run() -> LhResult<()> {
 
     match cli.command.unwrap_or(Commands::List {
         global: false,
+        directory: None,
+        agent: None,
         noalias: false,
         onlyalias: false,
         limit: None,
@@ -249,6 +296,8 @@ fn run() -> LhResult<()> {
     }) {
         Commands::List {
             global,
+            directory,
+            agent,
             noalias,
             onlyalias,
             limit,
@@ -259,6 +308,8 @@ fn run() -> LhResult<()> {
             &cwd,
             ListRequest {
                 global,
+                directory,
+                agent,
                 noalias,
                 onlyalias,
                 limit,
@@ -267,14 +318,26 @@ fn run() -> LhResult<()> {
                 regex,
             },
         ),
-        Commands::New { agent, name } => new_thread(&cwd, agent, name),
+        Commands::New {
+            directory,
+            agent,
+            name,
+        } => {
+            let cwd = command_cwd(&cwd, directory)?;
+            new_thread(&cwd, agent, name)
+        }
         Commands::Resume {
+            directory,
             gui,
             agent_or_name,
             name,
-        } => resume(&cwd, gui, agent_or_name, name),
+        } => {
+            let cwd = command_cwd(&cwd, directory)?;
+            resume(&cwd, gui, agent_or_name, name)
+        }
         Commands::Rename {
             global,
+            directory,
             thread_id,
             new_name,
             auto,
@@ -283,20 +346,23 @@ fn run() -> LhResult<()> {
             prompt,
             unset,
             dry_run,
-        } => rename(
-            &cwd,
-            RenameRequest {
-                global,
-                thread_id,
-                new_name,
-                auto,
-                llm_provider: provider,
-                llm_model: model,
-                llm_prompt: prompt,
-                unset,
-                dry_run,
-            },
-        ),
+        } => {
+            let cwd = command_cwd(&cwd, directory)?;
+            rename(
+                &cwd,
+                RenameRequest {
+                    global,
+                    thread_id,
+                    new_name,
+                    auto,
+                    llm_provider: provider,
+                    llm_model: model,
+                    llm_prompt: prompt,
+                    unset,
+                    dry_run,
+                },
+            )
+        }
         Commands::Move {
             global,
             target,
@@ -315,11 +381,15 @@ fn run() -> LhResult<()> {
             name,
         } => memory(&cwd, global, agent_or_name, name),
         Commands::Alias {
+            directory,
             symbolic,
             delete,
             source_or_target,
             target,
-        } => alias(&cwd, symbolic, delete, source_or_target, target),
+        } => {
+            let cwd = command_cwd(&cwd, directory)?;
+            alias(&cwd, symbolic, delete, source_or_target, target)
+        }
         Commands::Unalias { dir } => unalias(&cwd, dir),
         Commands::Cd { dir } => cd(&cwd, dir),
         Commands::Remove {
@@ -383,6 +453,8 @@ fn is_broken_pipe_error(mut error: &(dyn std::error::Error + 'static)) -> bool {
 
 struct ListRequest {
     global: bool,
+    directory: Option<PathBuf>,
+    agent: Option<AgentKind>,
     noalias: bool,
     onlyalias: bool,
     limit: Option<usize>,
@@ -394,10 +466,22 @@ struct ListRequest {
 fn list(cwd: &Path, request: ListRequest) -> LhResult<()> {
     let columns = parse_list_columns(&request.output)?;
     let filters = ListFilters::new(request.search, request.regex)?;
-    let mut threads = if request.global {
+    let list_cwd = match &request.directory {
+        Some(directory) => config::normalize_dir(cwd, directory)?,
+        None => cwd.to_path_buf(),
+    };
+    let mut threads = if let Some(agent) = request.agent {
+        let provider = providers::by_kind(agent);
+        if request.global {
+            provider.list_threads_global()?
+        } else {
+            let dirs = list_dirs(&list_cwd, request.noalias, request.onlyalias)?;
+            providers::list_provider_for_dirs(&*provider, &dirs)?
+        }
+    } else if request.global {
         providers::list_global()?
     } else {
-        let dirs = list_dirs(cwd, request.noalias, request.onlyalias)?;
+        let dirs = list_dirs(&list_cwd, request.noalias, request.onlyalias)?;
         providers::list_all_for_dirs(&dirs)?
     };
     threads = filter_threads(threads, &filters);
@@ -410,12 +494,12 @@ fn list(cwd: &Path, request: ListRequest) -> LhResult<()> {
             if request.global {
                 outln!("No matching threads found");
             } else {
-                outln!("No matching threads found for {}", cwd.display());
+                outln!("No matching threads found for {}", list_cwd.display());
             }
         } else if request.global {
             outln!("No threads found");
         } else {
-            outln!("No threads found for {}", cwd.display());
+            outln!("No threads found for {}", list_cwd.display());
         }
         return Ok(());
     }
@@ -541,6 +625,8 @@ fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
         args.insert(2, global);
     }
 
+    move_leading_directory_flag(&mut args);
+
     if is_list_shortcut_arg(&args[1]) || is_numeric_limit_arg(&args[1]) {
         args.insert(1, OsString::from("list"));
     }
@@ -566,12 +652,57 @@ fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     normalized
 }
 
+fn move_leading_directory_flag(args: &mut Vec<OsString>) {
+    if args.len() <= 2 {
+        return;
+    }
+
+    if is_directory_arg_with_value(&args[1]) {
+        if args
+            .get(2)
+            .and_then(|arg| arg.to_str())
+            .is_some_and(directory_flag_subcommand)
+        {
+            let directory = args.remove(1);
+            args.insert(2, directory);
+        }
+        return;
+    }
+
+    if !is_directory_arg_name(&args[1]) || args.len() <= 3 {
+        return;
+    }
+
+    if args
+        .get(3)
+        .and_then(|arg| arg.to_str())
+        .is_some_and(directory_flag_subcommand)
+    {
+        let flag = args.remove(1);
+        let directory = args.remove(1);
+        args.insert(2, flag);
+        args.insert(3, directory);
+    }
+}
+
 fn is_list_shortcut_arg(arg: &OsString) -> bool {
     let value = arg.to_string_lossy();
     is_global_arg(arg)
+        || value.starts_with("--agent=")
+        || value.starts_with("--directory=")
+        || (value.starts_with("-C") && value.len() > 2)
         || matches!(
             value.as_ref(),
-            "--noalias" | "--onlyalias" | "--limit" | "-o" | "--output" | "--search" | "--regex"
+            "-a" | "--agent"
+                | "-C"
+                | "--directory"
+                | "--noalias"
+                | "--onlyalias"
+                | "--limit"
+                | "-o"
+                | "--output"
+                | "--search"
+                | "--regex"
         )
 }
 
@@ -580,10 +711,27 @@ fn is_global_arg(arg: &OsString) -> bool {
     matches!(value.as_ref(), "-g" | "--global")
 }
 
+fn is_directory_arg_name(arg: &OsString) -> bool {
+    let value = arg.to_string_lossy();
+    matches!(value.as_ref(), "-C" | "--directory")
+}
+
+fn is_directory_arg_with_value(arg: &OsString) -> bool {
+    let value = arg.to_string_lossy();
+    value.starts_with("--directory=") || (value.starts_with("-C") && value.len() > 2)
+}
+
 fn global_flag_subcommand(arg: &str) -> bool {
     matches!(
         arg,
         "list" | "ls" | "rename" | "move" | "mv" | "info" | "memory" | "mem" | "remove" | "rm"
+    )
+}
+
+fn directory_flag_subcommand(arg: &str) -> bool {
+    matches!(
+        arg,
+        "list" | "ls" | "new" | "resume" | "rename" | "alias" | "ln"
     )
 }
 
@@ -595,6 +743,17 @@ fn is_numeric_limit_arg(arg: &OsString) -> bool {
         return false;
     };
     !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn parse_agent_kind(value: &str) -> Result<AgentKind, String> {
+    AgentKind::parse(value).ok_or_else(|| format!("unknown agent '{value}'"))
+}
+
+fn command_cwd(cwd: &Path, directory: Option<PathBuf>) -> LhResult<PathBuf> {
+    match directory {
+        Some(directory) => config::normalize_dir(cwd, &directory),
+        None => Ok(cwd.to_path_buf()),
+    }
 }
 
 fn new_thread(cwd: &Path, agent: Option<String>, name: Option<String>) -> LhResult<()> {
@@ -1921,6 +2080,30 @@ mod tests {
     }
 
     #[test]
+    fn inserts_default_list_for_global_agent_flag() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-g", "--agent", "zed"])),
+            strings(&["lh", "list", "-g", "--agent", "zed"])
+        );
+    }
+
+    #[test]
+    fn inserts_default_list_for_directory_flag() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-C", "/tmp/project"])),
+            strings(&["lh", "list", "-C", "/tmp/project"])
+        );
+    }
+
+    #[test]
+    fn moves_directory_flag_in_front_of_resume() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-C", "/tmp/project", "resume", "abc123"])),
+            strings(&["lh", "resume", "-C", "/tmp/project", "abc123"])
+        );
+    }
+
+    #[test]
     fn inserts_default_list_for_noalias_flag() {
         assert_eq!(
             normalize_args(strings(&["lh", "--noalias"])),
@@ -1970,6 +2153,39 @@ mod tests {
             Some(Commands::List { search, regex, .. })
                 if search == vec!["parser".to_string(), "codex".to_string()]
                     && regex == vec!["fix|repair".to_string(), "src/.*\\.rs".to_string()]
+        ));
+    }
+
+    #[test]
+    fn list_rejects_global_with_directory() {
+        let result = Cli::try_parse_from(strings(&[
+            "lh",
+            "list",
+            "--global",
+            "--directory",
+            "/tmp/project",
+        ]));
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == clap::error::ErrorKind::ArgumentConflict
+        ));
+    }
+
+    #[test]
+    fn rename_rejects_global_with_directory() {
+        let result = Cli::try_parse_from(strings(&[
+            "lh",
+            "rename",
+            "-g",
+            "-C",
+            "/tmp/project",
+            "abc123",
+        ]));
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == clap::error::ErrorKind::ArgumentConflict
         ));
     }
 
@@ -2181,6 +2397,7 @@ mod tests {
                 gui: true,
                 agent_or_name: Some(agent),
                 name: Some(name),
+                ..
             }) if agent == "claude" && name == "Yoyoyo"
         ));
     }
