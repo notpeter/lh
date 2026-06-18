@@ -88,6 +88,8 @@ enum Commands {
     },
     #[command(about = "Resume an existing agent thread")]
     Resume {
+        #[arg(long, help = "Resume the selected thread in its desktop app")]
+        gui: bool,
         #[arg(help = "Thread name/id to resume, or agent when followed by NAME-OR-ID")]
         agent_or_name: Option<String>,
         #[arg(help = "Thread name/id when AGENT-OR-NAME is an agent")]
@@ -267,9 +269,10 @@ fn run() -> LhResult<()> {
         ),
         Commands::New { agent, name } => new_thread(&cwd, agent, name),
         Commands::Resume {
+            gui,
             agent_or_name,
             name,
-        } => resume(&cwd, agent_or_name, name),
+        } => resume(&cwd, gui, agent_or_name, name),
         Commands::Rename {
             global,
             thread_id,
@@ -601,14 +604,42 @@ fn new_thread(cwd: &Path, agent: Option<String>, name: Option<String>) -> LhResu
     command.exec()
 }
 
-fn resume(cwd: &Path, agent_or_name: Option<String>, name: Option<String>) -> LhResult<()> {
+fn resume(
+    cwd: &Path,
+    gui: bool,
+    agent_or_name: Option<String>,
+    name: Option<String>,
+) -> LhResult<()> {
     let (agent, query) = parse_selector(agent_or_name, name)?;
     let (provider, thread) = select_provider_thread(cwd, false, agent, query.as_deref())?;
     if let Some(thread) = &thread {
         ensure_resumable_from_cwd(cwd, thread)?;
     }
-    let command = provider.resume_command(thread.as_ref())?;
-    command.exec()
+    if gui && provider.kind() == AgentKind::Zed {
+        return provider.resume_command(thread.as_ref())?.exec();
+    }
+    let command = if gui {
+        let thread = thread
+            .as_ref()
+            .ok_or("lh resume --gui requires a selected thread with desktop app support")?;
+        desktop_app_resume_command(thread)?
+    } else {
+        provider.resume_command(thread.as_ref())?
+    };
+
+    if gui { command.run() } else { command.exec() }
+}
+
+fn desktop_app_resume_command(thread: &ThreadSummary) -> LhResult<LaunchCommand> {
+    let url = match thread.agent {
+        AgentKind::Claude => format!("claude://resume?session={}", thread.id),
+        AgentKind::Codex => format!("codex://threads/{}", thread.id),
+        _ => {
+            return Err(format!("desktop app resume is not supported for {}", thread.agent).into());
+        }
+    };
+
+    Ok(LaunchCommand::new("open", [url]))
 }
 
 struct RenameRequest {
@@ -2136,6 +2167,93 @@ mod tests {
         assert_eq!(
             normalize_args(strings(&["lh", "resume", "-10"])),
             strings(&["lh", "resume", "-10"])
+        );
+    }
+
+    #[test]
+    fn resume_parses_gui_flag() {
+        let cli =
+            Cli::try_parse_from(strings(&["lh", "resume", "--gui", "claude", "Yoyoyo"])).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Resume {
+                gui: true,
+                agent_or_name: Some(agent),
+                name: Some(name),
+            }) if agent == "claude" && name == "Yoyoyo"
+        ));
+    }
+
+    #[test]
+    fn desktop_app_resume_command_opens_claude_resume_deep_link() {
+        let thread = ThreadSummary {
+            agent: AgentKind::Claude,
+            id: "34c343db-6a78-4654-a41c-01e3d9237f76".to_string(),
+            name: Some("Yoyoyo".to_string()),
+            model: None,
+            cwd: PathBuf::from("/tmp/project"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+
+        let command = desktop_app_resume_command(&thread).unwrap();
+
+        assert_eq!(
+            command.display(),
+            "open claude://resume?session=34c343db-6a78-4654-a41c-01e3d9237f76"
+        );
+    }
+
+    #[test]
+    fn desktop_app_resume_command_opens_codex_thread_deep_link() {
+        let thread = ThreadSummary {
+            agent: AgentKind::Codex,
+            id: "019edb00-57b9-7241-bd5c-2547dc18afb7".to_string(),
+            name: Some("load-in-claude-gui".to_string()),
+            model: None,
+            cwd: PathBuf::from("/tmp/project"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+
+        let command = desktop_app_resume_command(&thread).unwrap();
+
+        assert_eq!(
+            command.display(),
+            "open codex://threads/019edb00-57b9-7241-bd5c-2547dc18afb7"
+        );
+    }
+
+    #[test]
+    fn desktop_app_resume_command_rejects_unsupported_agents() {
+        let thread = ThreadSummary {
+            agent: AgentKind::OpenCode,
+            id: "abc123".to_string(),
+            name: None,
+            model: None,
+            cwd: PathBuf::from("/tmp/project"),
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+
+        let error = desktop_app_resume_command(&thread).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "desktop app resume is not supported for opencode"
         );
     }
 
