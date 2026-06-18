@@ -770,21 +770,23 @@ fn resume(
     name: Option<String>,
 ) -> LhResult<()> {
     let (agent, query) = parse_selector(agent_or_name, name)?;
-    let (provider, thread) = select_provider_thread(cwd, false, agent, query.as_deref())?;
-    if let Some(thread) = &thread {
-        ensure_resumable_from_cwd(cwd, thread)?;
-    }
-    if gui && provider.kind() == AgentKind::Zed {
-        return provider.resume_command(thread.as_ref())?.exec();
-    }
-    let command = if gui {
+    let (provider, thread) = select_resume_provider_thread(cwd, agent, query.as_deref())?;
+    let mut command = if gui {
         let thread = thread
             .as_ref()
             .ok_or("lh resume --gui requires a selected thread with desktop app support")?;
-        desktop_app_resume_command(thread)?
+        if provider.kind() == AgentKind::Zed {
+            provider.resume_command(Some(thread))?
+        } else {
+            desktop_app_resume_command(thread)?
+        }
     } else {
         provider.resume_command(thread.as_ref())?
     };
+
+    if let Some(thread) = &thread {
+        command = command.with_current_dir(resume_working_dir(thread));
+    }
 
     if gui { command.run() } else { command.exec() }
 }
@@ -1359,6 +1361,30 @@ fn select_provider_thread(
     }
 }
 
+fn select_resume_provider_thread(
+    cwd: &Path,
+    agent: Option<AgentKind>,
+    query: Option<&str>,
+) -> LhResult<(Box<dyn AgentProvider>, Option<ThreadSummary>)> {
+    match select_provider_thread(cwd, false, agent, query) {
+        Ok(selected) => Ok(selected),
+        Err(error) if query.is_some() && error.to_string() == "no matching thread found" => {
+            select_provider_thread(cwd, true, agent, query)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn resume_working_dir(thread: &ThreadSummary) -> PathBuf {
+    let cwd = canonicalize_existing(&thread.cwd);
+    if cwd.is_file()
+        && let Some(parent) = cwd.parent()
+    {
+        return parent.to_path_buf();
+    }
+    cwd
+}
+
 fn ambiguous_error(candidates: Vec<&ThreadSummary>) -> String {
     let candidates = candidates.into_iter().take(5).collect::<Vec<_>>();
     let agent_width = candidates
@@ -1857,7 +1883,10 @@ fn print_thread_info(provider: &dyn AgentProvider, thread: &ThreadSummary) -> Lh
     if let Some(target) = &thread.removable {
         field("Removable", removal_description(thread, target))?;
     }
-    if let Ok(command) = provider.resume_command(Some(thread)) {
+    if let Ok(command) = provider
+        .resume_command(Some(thread))
+        .map(|command| command.with_current_dir(resume_working_dir(thread)))
+    {
         field("Resume", command.display())?;
     }
     Ok(())
@@ -1927,52 +1956,6 @@ fn exec_shell_in_dir(dir: &Path) -> LhResult<()> {
             Err(format!("shell exited with {status}").into())
         }
     }
-}
-
-fn ensure_resumable_from_cwd(cwd: &Path, thread: &ThreadSummary) -> LhResult<()> {
-    let current = canonicalize_existing(cwd);
-    let thread_cwd = canonicalize_existing(&thread.cwd);
-    if current == thread_cwd {
-        return Ok(());
-    }
-
-    let alias_group = config::alias_group(cwd)?;
-    if alias_group.contains(&thread_cwd) {
-        return Err(alternate_directory_resume_message(thread, &thread_cwd).into());
-    }
-
-    Ok(())
-}
-
-fn alternate_directory_resume_message(thread: &ThreadSummary, thread_cwd: &Path) -> String {
-    format!(
-        "That session was created under an alternate directory. To resume run:\n    cd {} && lh resume {}",
-        shell_path(thread_cwd),
-        shell_arg(&thread.id),
-    )
-}
-
-fn shell_path(path: &Path) -> String {
-    let compact = config::compact_home_path(path);
-    if is_shell_safe(&compact) {
-        compact
-    } else {
-        shell_arg(&path.display().to_string())
-    }
-}
-
-fn shell_arg(value: &str) -> String {
-    if is_shell_safe(value) {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn is_shell_safe(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | '~'))
 }
 
 fn removal_description(thread: &ThreadSummary, target: &RemovalTarget) -> String {
@@ -3004,13 +2987,19 @@ mod tests {
     }
 
     #[test]
-    fn alternate_directory_resume_message_points_at_owner_dir() {
+    fn resume_working_dir_uses_thread_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "lh-resume-dir-{}-{}",
+            std::process::id(),
+            "directory"
+        ));
+        fs::create_dir_all(&root).unwrap();
         let thread = ThreadSummary {
             agent: AgentKind::Codex,
             id: "abc123".to_string(),
             name: None,
             model: None,
-            cwd: PathBuf::from("/tmp/other clone"),
+            cwd: root.clone(),
             created_at: None,
             updated_at: None,
             source_path: None,
@@ -3019,9 +3008,30 @@ mod tests {
             resume_hint: None,
         };
 
-        assert_eq!(
-            alternate_directory_resume_message(&thread, Path::new("/tmp/other clone")),
-            "That session was created under an alternate directory. To resume run:\n    cd '/tmp/other clone' && lh resume abc123"
-        );
+        assert_eq!(resume_working_dir(&thread), canonicalize_existing(&root));
+    }
+
+    #[test]
+    fn resume_working_dir_uses_parent_for_file_workspace() {
+        let root =
+            std::env::temp_dir().join(format!("lh-resume-dir-{}-{}", std::process::id(), "file"));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("Brewfile");
+        fs::write(&file, "brew \"ripgrep\"\n").unwrap();
+        let thread = ThreadSummary {
+            agent: AgentKind::Zed,
+            id: "abc123".to_string(),
+            name: None,
+            model: None,
+            cwd: file,
+            created_at: None,
+            updated_at: None,
+            source_path: None,
+            preview: None,
+            removable: None,
+            resume_hint: None,
+        };
+
+        assert_eq!(resume_working_dir(&thread), canonicalize_existing(&root));
     }
 }

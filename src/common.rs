@@ -132,6 +132,7 @@ pub enum RemovalTarget {
 pub struct LaunchCommand {
     pub program: OsString,
     pub args: Vec<OsString>,
+    pub current_dir: Option<PathBuf>,
 }
 
 impl LaunchCommand {
@@ -142,7 +143,13 @@ impl LaunchCommand {
         Self {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
+            current_dir: None,
         }
+    }
+
+    pub fn with_current_dir(mut self, current_dir: impl Into<PathBuf>) -> Self {
+        self.current_dir = Some(current_dir.into());
+        self
     }
 
     pub fn display(&self) -> String {
@@ -152,20 +159,34 @@ impl LaunchCommand {
                 .iter()
                 .map(|arg| arg.to_string_lossy().into_owned()),
         );
-        parts.join(" ")
+        let command = parts.join(" ");
+        self.current_dir
+            .as_ref()
+            .map(|dir| format!("(cd {} && {command})", dir.display()))
+            .unwrap_or(command)
     }
 
     pub fn exec(self) -> LhResult<()> {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            let err = Command::new(&self.program).args(&self.args).exec();
+            let mut command = Command::new(&self.program);
+            command.args(&self.args);
+            if let Some(current_dir) = &self.current_dir {
+                command.current_dir(current_dir);
+            }
+            let err = command.exec();
             Err(Box::new(err))
         }
 
         #[cfg(not(unix))]
         {
-            let status = Command::new(&self.program).args(&self.args).status()?;
+            let mut command = Command::new(&self.program);
+            command.args(&self.args);
+            if let Some(current_dir) = &self.current_dir {
+                command.current_dir(current_dir);
+            }
+            let status = command.status()?;
             if status.success() {
                 Ok(())
             } else {
@@ -175,7 +196,12 @@ impl LaunchCommand {
     }
 
     pub fn run(self) -> LhResult<()> {
-        let status = Command::new(&self.program).args(&self.args).status()?;
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        if let Some(current_dir) = &self.current_dir {
+            command.current_dir(current_dir);
+        }
+        let status = command.status()?;
         if status.success() {
             Ok(())
         } else {
