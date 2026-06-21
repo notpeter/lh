@@ -6,6 +6,7 @@ mod fuzzy;
 mod gemini;
 mod llm;
 mod opencode;
+mod pi;
 mod prices;
 mod providers;
 mod util;

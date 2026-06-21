@@ -5,7 +5,7 @@ Unified LLM agent thread history
 ## Usage
 
 `lh` lists recent LLM agent threads for the current directory across Claude Code,
-Codex, OpenCode, and Gemini.
+Codex, OpenCode, Gemini, Zed, and Pi.
 
 ```sh
 lh list
@@ -39,8 +39,8 @@ lh remove <agent> <name-or-id> --force
 ```
 
 Agent aliases include `claude`, `claude-code`, `codex`, `opencode`, `open-code`,
-`gemini`, and `gemini-cli`. Commands read agent histories directly from their
-native stores.
+`gemini`, `gemini-cli`, `zed`, and `pi`. Commands read agent histories directly
+from their native stores.
 
 `lh ls` is scoped to the current directory. `lh ls -g` scans all known agent
 history. By default, local listings include configured directory aliases. Use

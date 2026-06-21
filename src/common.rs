@@ -17,6 +17,7 @@ pub enum AgentKind {
     OpenCode,
     Gemini,
     Zed,
+    Pi,
 }
 
 impl AgentKind {
@@ -27,6 +28,7 @@ impl AgentKind {
             AgentKind::OpenCode => "opencode",
             AgentKind::Gemini => "gemini",
             AgentKind::Zed => "zed",
+            AgentKind::Pi => "pi",
         }
     }
 
@@ -37,6 +39,7 @@ impl AgentKind {
             AgentKind::OpenCode => "OpenCode",
             AgentKind::Gemini => "Gemini",
             AgentKind::Zed => "Zed",
+            AgentKind::Pi => "Pi",
         }
     }
 
@@ -47,6 +50,7 @@ impl AgentKind {
             "opencode" | "open-code" | "oc" => Some(Self::OpenCode),
             "gemini" | "gemini-cli" | "google-gemini" => Some(Self::Gemini),
             "zed" | "zed-agent" => Some(Self::Zed),
+            "pi" | "pi-coding-agent" | "pi-agent" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -354,6 +358,7 @@ mod tests {
         assert_eq!(AgentKind::parse("claude-code"), Some(AgentKind::Claude));
         assert_eq!(AgentKind::parse("gemini-cli"), Some(AgentKind::Gemini));
         assert_eq!(AgentKind::parse("open-code"), Some(AgentKind::OpenCode));
+        assert_eq!(AgentKind::parse("pi-coding-agent"), Some(AgentKind::Pi));
         assert_eq!(AgentKind::parse("nope"), None);
     }
 
