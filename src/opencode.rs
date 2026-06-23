@@ -216,7 +216,6 @@ impl OpenCodeProvider {
                 source_path: Some(db_path.clone()),
                 preview,
                 removable,
-                resume_hint: None,
             });
         }
 

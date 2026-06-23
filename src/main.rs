@@ -1,9 +1,9 @@
+mod antigravity;
 mod claude;
 mod codex;
 mod common;
 mod config;
 mod fuzzy;
-mod gemini;
 mod llm;
 mod opencode;
 mod pi;
@@ -1318,10 +1318,10 @@ fn parse_selector(
 
 fn default_new_agent() -> AgentKind {
     for candidate in [
+        AgentKind::AntiGravity,
         AgentKind::Codex,
         AgentKind::Claude,
         AgentKind::OpenCode,
-        AgentKind::Gemini,
     ] {
         let provider = providers::by_kind(candidate);
         if provider.executable().is_some() {
@@ -1988,8 +1988,8 @@ fn removal_description(thread: &ThreadSummary, target: &RemovalTarget) -> String
         RemovalTarget::OpenCodeDb { db_path, .. } => {
             format!("opencode {} from {}", thread.id, db_path.display())
         }
-        RemovalTarget::GeminiFiles { chat_path, .. } => {
-            format!("gemini {} file {}", thread.id, chat_path.display())
+        RemovalTarget::AntiGravityFiles { db_path, .. } => {
+            format!("antigravity {} file {}", thread.id, db_path.display())
         }
     }
 }
@@ -2005,11 +2005,37 @@ fn execute_removal(target: RemovalTarget) -> LhResult<()> {
             db_path,
             session_id,
         } => opencode::delete_session_from_db(&db_path, &session_id),
-        RemovalTarget::GeminiFiles {
-            chat_path,
-            logs_path,
-            session_id,
-        } => gemini::delete_gemini_files(&chat_path, logs_path.as_deref(), &session_id),
+        RemovalTarget::AntiGravityFiles {
+            db_path,
+            brain_dir,
+            _session_id: _,
+        } => {
+            if db_path.exists() {
+                fs::remove_file(&db_path)?;
+            }
+            let shm = db_path.with_extension("db-shm");
+            if shm.exists() {
+                let _ = fs::remove_file(shm);
+            }
+            let wal = db_path.with_extension("db-wal");
+            if wal.exists() {
+                let _ = fs::remove_file(wal);
+            }
+            if let Some(ann) = db_path.parent().and_then(|p| p.parent()).map(|p| {
+                p.join("annotations")
+                    .join(db_path.file_name().unwrap())
+                    .with_extension("pbtxt")
+            }) && ann.exists()
+            {
+                let _ = fs::remove_file(ann);
+            }
+            if let Some(dir) = brain_dir
+                && dir.exists()
+            {
+                let _ = fs::remove_dir_all(dir);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -2445,7 +2471,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
 
         let command = desktop_app_resume_command(&thread).unwrap();
@@ -2469,7 +2494,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
 
         let command = desktop_app_resume_command(&thread).unwrap();
@@ -2493,7 +2517,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
 
         let error = desktop_app_resume_command(&thread).unwrap_err();
@@ -2747,7 +2770,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
         let codex = ThreadSummary {
             agent: AgentKind::Codex,
@@ -2760,7 +2782,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
 
         assert_eq!(
@@ -2782,7 +2803,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
 
         assert_eq!(
@@ -2809,7 +2829,6 @@ mod tests {
             source_path: None,
             preview: Some("preview".to_string()),
             removable: None,
-            resume_hint: None,
         };
 
         assert_eq!(
@@ -2861,7 +2880,6 @@ mod tests {
             source_path: None,
             preview: Some("preview".to_string()),
             removable: None,
-            resume_hint: None,
         };
 
         assert_eq!(
@@ -2892,7 +2910,6 @@ mod tests {
                 source_path: None,
                 preview: Some("handles json history".to_string()),
                 removable: None,
-                resume_hint: None,
             },
             ThreadSummary {
                 agent: AgentKind::Claude,
@@ -2905,7 +2922,6 @@ mod tests {
                 source_path: None,
                 preview: Some("parser is out of scope".to_string()),
                 removable: None,
-                resume_hint: None,
             },
             ThreadSummary {
                 agent: AgentKind::OpenCode,
@@ -2918,7 +2934,6 @@ mod tests {
                 source_path: None,
                 preview: None,
                 removable: None,
-                resume_hint: None,
             },
         ];
         let filters =
@@ -2949,7 +2964,6 @@ mod tests {
                 source_path: Some(PathBuf::from("/tmp/lh/src/main.rs")),
                 preview: None,
                 removable: None,
-                resume_hint: None,
             },
             ThreadSummary {
                 agent: AgentKind::Codex,
@@ -2962,7 +2976,6 @@ mod tests {
                 source_path: Some(PathBuf::from("/tmp/lh/README.md")),
                 preview: None,
                 removable: None,
-                resume_hint: None,
             },
         ];
         let filters = ListFilters::new(
@@ -3008,7 +3021,6 @@ mod tests {
             source_path: None,
             preview: Some(preview.clone()),
             removable: None,
-            resume_hint: None,
         };
 
         assert_eq!(thread_list_name(&thread), preview);
@@ -3027,7 +3039,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
 
         assert_eq!(thread_list_name(&thread), "-");
@@ -3052,7 +3063,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
 
         assert_eq!(resume_working_dir(&thread), canonicalize_existing(&root));
@@ -3076,7 +3086,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         };
 
         assert_eq!(resume_working_dir(&thread), canonicalize_existing(&root));

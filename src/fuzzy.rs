@@ -100,7 +100,6 @@ mod tests {
             source_path: None,
             preview: None,
             removable: None,
-            resume_hint: None,
         }
     }
 
@@ -135,7 +134,6 @@ mod tests {
             source_path: Some(PathBuf::from("/tmp/contains-query.jsonl")),
             preview: Some("contains query".to_string()),
             removable: None,
-            resume_hint: None,
         }];
 
         assert!(matches!(

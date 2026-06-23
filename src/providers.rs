@@ -1,20 +1,20 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::antigravity::AntiGravityProvider;
 use crate::claude::ClaudeProvider;
 use crate::codex::CodexProvider;
 use crate::common::{AgentKind, AgentProvider, LhResult, MemoryFile, ThreadSummary};
-use crate::gemini::GeminiProvider;
 use crate::opencode::OpenCodeProvider;
 use crate::pi::PiProvider;
 use crate::zed::ZedProvider;
 
 pub fn all() -> Vec<Box<dyn AgentProvider>> {
     vec![
+        Box::new(AntiGravityProvider::new()),
         Box::new(ClaudeProvider::new()),
         Box::new(CodexProvider::new()),
         Box::new(OpenCodeProvider::new()),
-        Box::new(GeminiProvider::new()),
         Box::new(ZedProvider::new()),
         Box::new(PiProvider::new()),
     ]
@@ -22,10 +22,10 @@ pub fn all() -> Vec<Box<dyn AgentProvider>> {
 
 pub fn by_kind(kind: AgentKind) -> Box<dyn AgentProvider> {
     match kind {
+        AgentKind::AntiGravity => Box::new(AntiGravityProvider::new()),
         AgentKind::Claude => Box::new(ClaudeProvider::new()),
         AgentKind::Codex => Box::new(CodexProvider::new()),
         AgentKind::OpenCode => Box::new(OpenCodeProvider::new()),
-        AgentKind::Gemini => Box::new(GeminiProvider::new()),
         AgentKind::Zed => Box::new(ZedProvider::new()),
         AgentKind::Pi => Box::new(PiProvider::new()),
     }

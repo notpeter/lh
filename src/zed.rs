@@ -185,7 +185,6 @@ impl ZedProvider {
                 source_path: Some(db_path.clone()),
                 preview,
                 removable: None,
-                resume_hint: None,
             });
         }
 

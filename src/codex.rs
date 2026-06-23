@@ -294,7 +294,6 @@ fn parse_codex_rollout(
         source_path: Some(path.to_path_buf()),
         preview,
         removable: Some(RemovalTarget::File(path.to_path_buf())),
-        resume_hint: None,
     })
 }
 

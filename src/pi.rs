@@ -253,7 +253,6 @@ fn parse_pi_session(path: &Path) -> LhResult<Option<ThreadSummary>> {
         source_path: Some(path.to_path_buf()),
         preview,
         removable: Some(RemovalTarget::File(path.to_path_buf())),
-        resume_hint: None,
     }))
 }
 

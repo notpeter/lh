@@ -12,10 +12,10 @@ pub type LhResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AgentKind {
+    AntiGravity,
     Claude,
     Codex,
     OpenCode,
-    Gemini,
     Zed,
     Pi,
 }
@@ -23,10 +23,10 @@ pub enum AgentKind {
 impl AgentKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            AgentKind::AntiGravity => "agy",
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::OpenCode => "opencode",
-            AgentKind::Gemini => "gemini",
             AgentKind::Zed => "zed",
             AgentKind::Pi => "pi",
         }
@@ -34,10 +34,10 @@ impl AgentKind {
 
     pub fn display_name(self) -> &'static str {
         match self {
+            AgentKind::AntiGravity => "AntiGravity",
             AgentKind::Claude => "Claude",
             AgentKind::Codex => "Codex",
             AgentKind::OpenCode => "OpenCode",
-            AgentKind::Gemini => "Gemini",
             AgentKind::Zed => "Zed",
             AgentKind::Pi => "Pi",
         }
@@ -45,10 +45,10 @@ impl AgentKind {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
+            "antigravity" | "agy" => Some(Self::AntiGravity),
             "claude" | "claude-code" | "claudecode" => Some(Self::Claude),
             "codex" | "openai-codex" | "openai" => Some(Self::Codex),
             "opencode" | "open-code" | "oc" => Some(Self::OpenCode),
-            "gemini" | "gemini-cli" | "google-gemini" => Some(Self::Gemini),
             "zed" | "zed-agent" => Some(Self::Zed),
             "pi" | "pi-coding-agent" | "pi-agent" => Some(Self::Pi),
             _ => None,
@@ -74,7 +74,6 @@ pub struct ThreadSummary {
     pub source_path: Option<PathBuf>,
     pub preview: Option<String>,
     pub removable: Option<RemovalTarget>,
-    pub resume_hint: Option<ResumeHint>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,11 +112,6 @@ impl ThreadSummary {
 }
 
 #[derive(Debug, Clone)]
-pub enum ResumeHint {
-    GeminiSessionFile(PathBuf),
-}
-
-#[derive(Debug, Clone)]
 pub enum RemovalTarget {
     File(PathBuf),
     Command(LaunchCommand),
@@ -125,10 +119,10 @@ pub enum RemovalTarget {
         db_path: PathBuf,
         session_id: String,
     },
-    GeminiFiles {
-        chat_path: PathBuf,
-        logs_path: Option<PathBuf>,
-        session_id: String,
+    AntiGravityFiles {
+        db_path: PathBuf,
+        brain_dir: Option<PathBuf>,
+        _session_id: String,
     },
 }
 
@@ -356,9 +350,13 @@ mod tests {
     #[test]
     fn parses_agent_aliases() {
         assert_eq!(AgentKind::parse("claude-code"), Some(AgentKind::Claude));
-        assert_eq!(AgentKind::parse("gemini-cli"), Some(AgentKind::Gemini));
         assert_eq!(AgentKind::parse("open-code"), Some(AgentKind::OpenCode));
         assert_eq!(AgentKind::parse("pi-coding-agent"), Some(AgentKind::Pi));
+        assert_eq!(AgentKind::parse("agy"), Some(AgentKind::AntiGravity));
+        assert_eq!(
+            AgentKind::parse("antigravity"),
+            Some(AgentKind::AntiGravity)
+        );
         assert_eq!(AgentKind::parse("nope"), None);
     }
 

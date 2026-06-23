@@ -152,10 +152,6 @@ pub fn millis_to_time(value: i64) -> Option<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp(value / 1000).ok()
 }
 
-pub fn read_to_string(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok()
-}
-
 pub fn shorten_path(path: &Path) -> String {
     let home = home_dir();
     if let Ok(stripped) = path.strip_prefix(&home) {
