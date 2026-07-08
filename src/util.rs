@@ -71,7 +71,9 @@ pub fn format_time(value: OffsetDateTime) -> String {
 
 pub fn format_display_time(value: OffsetDateTime) -> String {
     let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let format = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]");
+    let format = time::format_description::parse_borrowed::<2>(
+        "[year]-[month]-[day] [hour]:[minute]:[second]",
+    );
     match format {
         Ok(format) => value
             .to_offset(offset)

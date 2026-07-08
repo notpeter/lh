@@ -398,7 +398,7 @@ fn number_field(value: &Value, name: &str) -> Option<f64> {
 }
 
 fn request_file_timestamp(date: OffsetDateTime) -> String {
-    let format = time::format_description::parse(
+    let format = time::format_description::parse_borrowed::<2>(
         "[year]-[month]-[day]T[hour][minute][second].[subsecond digits:3]Z",
     );
     match format {

@@ -131,11 +131,15 @@ impl ZedProvider {
         }
 
         let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut stmt = conn.prepare(
+        let mut stmt = match conn.prepare(
             "select id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at, data_type, data
              from threads
              order by updated_at desc, created_at desc",
-        )?;
+        ) {
+            Ok(stmt) => stmt,
+            Err(error) if is_missing_zed_parent_id_column(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
         let mut rows = stmt.query([])?;
         let mut threads = Vec::new();
 
@@ -191,6 +195,10 @@ impl ZedProvider {
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
         Ok(threads)
     }
+}
+
+fn is_missing_zed_parent_id_column(error: &rusqlite::Error) -> bool {
+    error.to_string().contains("no such column: parent_id")
 }
 
 fn zed_folder_paths(paths: Option<&str>, order: Option<&str>) -> Vec<PathBuf> {

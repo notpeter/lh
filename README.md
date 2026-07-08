@@ -4,6 +4,12 @@ Unified LLM agent thread history
 
 `lh` lists recent CLI agent threads for Claude, Codex, OpenCode, Antigravity, Zed, and Pi.
 
+## Install
+
+```shell
+cargo install --git https://github.com/notpeter/lh
+```
+
 ## Usage
 
 ### Example
