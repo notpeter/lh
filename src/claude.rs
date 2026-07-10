@@ -331,7 +331,6 @@ fn parse_claude_jsonl(
     let mut updated_at = None;
     let mut preview = None;
     let mut custom_title = None;
-    let mut cwd_from_file = None;
     let mut model = None;
 
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -346,13 +345,6 @@ fn parse_claude_jsonl(
                 .or_else(|| value.get("session_id"))
                 .and_then(|value| value.as_str())
                 .map(ToString::to_string);
-        }
-
-        if cwd_from_file.is_none() {
-            cwd_from_file = value
-                .get("cwd")
-                .and_then(|value| value.as_str())
-                .map(PathBuf::from);
         }
 
         let timestamp = value
@@ -397,9 +389,7 @@ fn parse_claude_jsonl(
         }
     }
 
-    let cwd = cwd_from_file
-        .map(|path| canonicalize_existing(&path))
-        .unwrap_or_else(|| fallback_cwd.to_path_buf());
+    let cwd = fallback_cwd.to_path_buf();
 
     if let Some(cwd_filter) = cwd_filter
         && !path_is_at_or_under(&cwd, cwd_filter)
@@ -567,11 +557,60 @@ fn encode_project_path(path: &Path) -> String {
 }
 
 fn decode_project_path(value: &str) -> PathBuf {
+    if let Some(path) = decode_existing_project_path(value) {
+        return path;
+    }
+
     if let Some(rest) = value.strip_prefix('-') {
         PathBuf::from(format!("/{rest}").replace('-', "/"))
     } else {
         PathBuf::from(value.replace('-', "/"))
     }
+}
+
+fn decode_existing_project_path(value: &str) -> Option<PathBuf> {
+    let (base, rest) = if let Some(rest) = value.strip_prefix('-') {
+        (PathBuf::from("/"), rest)
+    } else {
+        (PathBuf::from("."), value)
+    };
+    if rest.is_empty() {
+        return Some(canonicalize_existing(&base));
+    }
+
+    let parts = rest.split('-').collect::<Vec<_>>();
+    decode_existing_project_path_parts(&base, &parts, 0)
+}
+
+fn decode_existing_project_path_parts(
+    base: &Path,
+    parts: &[&str],
+    index: usize,
+) -> Option<PathBuf> {
+    if index >= parts.len() {
+        return base.exists().then(|| canonicalize_existing(base));
+    }
+
+    for end in ((index + 1)..=parts.len()).rev() {
+        let segment = parts[index..end].join("-");
+        if segment.is_empty() {
+            continue;
+        }
+        let candidate = base.join(segment);
+        if !candidate.exists() {
+            continue;
+        }
+        if end == parts.len() {
+            return Some(canonicalize_existing(&candidate));
+        }
+        if candidate.is_dir()
+            && let Some(path) = decode_existing_project_path_parts(&candidate, parts, end)
+        {
+            return Some(path);
+        }
+    }
+
+    None
 }
 
 fn git_root(cwd: &Path) -> Option<PathBuf> {
@@ -597,6 +636,19 @@ mod tests {
         assert_eq!(
             encode_project_path(Path::new("/Users/peter/code/lh")),
             "-Users-peter-code-lh"
+        );
+    }
+
+    #[test]
+    fn decodes_existing_hyphenated_claude_project_path() {
+        let root = temp_dir("claude-decode-hyphen");
+        let cwd = root.join("rfd-api");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(root.join("rfd/api")).unwrap();
+
+        assert_eq!(
+            decode_project_path(&encode_project_path(&cwd)),
+            canonicalize_existing(&cwd)
         );
     }
 
@@ -630,6 +682,31 @@ mod tests {
         assert_eq!(threads[0].name.as_deref(), Some("named claude"));
         assert_eq!(threads[0].model.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(threads[0].preview.as_deref(), Some("hello claude"));
+    }
+
+    #[test]
+    fn uses_claude_project_dir_instead_of_transcript_cwd() {
+        let root = temp_dir("claude-project-dir-cwd");
+        let cwd = root.join("work");
+        let transient_cwd = root.join("tmp");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&transient_cwd).unwrap();
+        let provider = ClaudeProvider::with_home(root);
+        let project_dir = provider.project_dir_for(&cwd);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("abc.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"abc\",\"cwd\":\"{}\",\"timestamp\":\"2026-05-01T00:00:00Z\",\"message\":{{\"content\":\"hello claude\"}}}}\n",
+                transient_cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let threads = provider.list_threads(&cwd).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].cwd, canonicalize_existing(&cwd));
+        assert!(provider.list_threads(&transient_cwd).unwrap().is_empty());
     }
 
     #[test]
