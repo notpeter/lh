@@ -124,6 +124,23 @@ Also requires a matching environment variable:
 | `anthropic` | `ANTHROPIC_API_KEY`| `claude-haiku-4-5`      |
 | `gemini`    | `GEMINI_API_KEY`   | `gemini-3.1-flash-lite` |
 
+## Contributing
+
+This project does not generally accept direct code contributions via PRs other
+than hand-written documentation / docstring improvements.
+
+The vast majority of the project is "vibe coded".
+I test/review the code to quality level that meets my needs, but no further.
+I have no desire to review code written by you or your agent.
+
+Instead please [open an issue](https://github.com/notpeter/lh/issues/new)
+and describe the issue your having, desired behvavior, enhancement request, etc.
+Provide as many details as possible and if reasonable, I'll have an agent
+implement it.
+
+Otherwise, please feel free to fork. The license is permissive for a reason
+and there will be no hard feelings. Thanks!
+
 ## License
 
 MIT Licensed
