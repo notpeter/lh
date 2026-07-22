@@ -55,11 +55,20 @@ impl AgentProvider for CodexProvider {
 
     fn list_threads(&self, cwd: &Path) -> LhResult<Vec<ThreadSummary>> {
         let canonical_cwd = canonicalize_existing(cwd);
-        Ok(self.list_rollouts(Some(&canonical_cwd)))
+        Ok(self.list_rollouts(Some(&canonical_cwd), false))
     }
 
     fn list_threads_global(&self) -> LhResult<Vec<ThreadSummary>> {
-        Ok(self.list_rollouts(None))
+        Ok(self.list_rollouts(None, false))
+    }
+
+    fn list_threads_all(&self, cwd: &Path) -> LhResult<Vec<ThreadSummary>> {
+        let canonical_cwd = canonicalize_existing(cwd);
+        Ok(self.list_rollouts(Some(&canonical_cwd), true))
+    }
+
+    fn list_threads_global_all(&self) -> LhResult<Vec<ThreadSummary>> {
+        Ok(self.list_rollouts(None, true))
     }
 
     fn list_memory(&self, _cwd: &Path) -> LhResult<Vec<MemoryFile>> {
@@ -179,12 +188,12 @@ impl AgentProvider for CodexProvider {
 }
 
 impl CodexProvider {
-    fn list_rollouts(&self, cwd_filter: Option<&Path>) -> Vec<ThreadSummary> {
+    fn list_rollouts(&self, cwd_filter: Option<&Path>, include_hidden: bool) -> Vec<ThreadSummary> {
         let names = read_session_index(&self.index_path());
         let mut threads =
             collect_files_with_name_prefix(&self.sessions_dir(), "rollout-", ".jsonl")
                 .into_iter()
-                .filter_map(|path| parse_codex_rollout(&path, cwd_filter, &names))
+                .filter_map(|path| parse_codex_rollout(&path, cwd_filter, &names, include_hidden))
                 .collect::<Vec<_>>();
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_sort_key()));
         threads
@@ -222,6 +231,7 @@ fn parse_codex_rollout(
     path: &Path,
     cwd_filter: Option<&Path>,
     names: &std::collections::HashMap<String, String>,
+    include_hidden: bool,
 ) -> Option<ThreadSummary> {
     let text = fs::read_to_string(path).ok()?;
     let mut id = None;
@@ -252,6 +262,11 @@ fn parse_codex_rollout(
 
         if value.get("type").and_then(|value| value.as_str()) == Some("session_meta") {
             let payload = value.get("payload")?;
+            if !include_hidden
+                && payload.get("thread_source").and_then(Value::as_str) == Some("subagent")
+            {
+                return None;
+            }
             id = payload
                 .get("id")
                 .and_then(|value| value.as_str())
@@ -443,6 +458,39 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].name, None);
         assert_eq!(threads[0].preview.as_deref(), Some("real user request"));
+    }
+
+    #[test]
+    fn hides_internal_threads_unless_all_threads_are_requested() {
+        let root = temp_dir("codex-hidden");
+        let cwd = root.join("work");
+        fs::create_dir_all(root.join(".codex/sessions/2026/05/27")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            root.join(".codex/sessions/2026/05/27/rollout-user.jsonl"),
+            format!(
+                "{{\"timestamp\":\"2026-05-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"user\",\"cwd\":\"{}\",\"thread_source\":\"user\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".codex/sessions/2026/05/27/rollout-hidden.jsonl"),
+            format!(
+                "{{\"timestamp\":\"2026-05-01T00:01:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"hidden\",\"cwd\":\"{}\",\"thread_source\":\"subagent\",\"source\":{{\"subagent\":{{\"other\":\"guardian\"}}}}}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let provider = CodexProvider::with_home(root);
+        let visible = provider.list_threads(&cwd).unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "user");
+
+        let all = provider.list_threads_all(&cwd).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|thread| thread.id == "hidden"));
     }
 
     #[test]

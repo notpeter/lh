@@ -50,8 +50,9 @@ Commands:
 
 ```
   -g, --global              Scan all known agent history
+      --all                 Include hidden internal threads
   -C, --directory <DIR>     Search threads for a specific directory
-  -a, --agent <AGENT>       Only list threads for one agent
+      --agent <AGENT>       Only list threads for one agent
       --limit <N>           Limit the number of rows shown
   -o, --output <FIELDS>...  Columns to show, comma-separated or repeated: updated, created, agent, id, model, dir, cwd, name, preview, source
       --search <TERM>...    Filter rows by one or more case-insensitive terms; all terms must match

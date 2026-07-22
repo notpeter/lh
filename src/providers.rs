@@ -31,10 +31,10 @@ pub fn by_kind(kind: AgentKind) -> Box<dyn AgentProvider> {
     }
 }
 
-pub fn list_all_for_dirs(cwds: &[PathBuf]) -> LhResult<Vec<ThreadSummary>> {
+pub fn list_all_for_dirs(cwds: &[PathBuf], include_hidden: bool) -> LhResult<Vec<ThreadSummary>> {
     let mut threads = Vec::new();
     for provider in all() {
-        match list_provider_for_dirs(&*provider, cwds) {
+        match list_provider_for_dirs(&*provider, cwds, include_hidden) {
             Ok(mut provider_threads) => threads.append(&mut provider_threads),
             Err(error) => eprintln!(
                 "warning: failed to read {} history: {error}",
@@ -49,10 +49,16 @@ pub fn list_all_for_dirs(cwds: &[PathBuf]) -> LhResult<Vec<ThreadSummary>> {
 pub fn list_provider_for_dirs(
     provider: &dyn AgentProvider,
     cwds: &[PathBuf],
+    include_hidden: bool,
 ) -> LhResult<Vec<ThreadSummary>> {
     let mut threads = Vec::new();
     for cwd in cwds {
-        match provider.list_threads(cwd) {
+        let result = if include_hidden {
+            provider.list_threads_all(cwd)
+        } else {
+            provider.list_threads(cwd)
+        };
+        match result {
             Ok(mut provider_threads) => threads.append(&mut provider_threads),
             Err(error) => eprintln!(
                 "warning: failed to read {} history for {}: {error}",
@@ -65,10 +71,15 @@ pub fn list_provider_for_dirs(
     Ok(threads)
 }
 
-pub fn list_global() -> LhResult<Vec<ThreadSummary>> {
+pub fn list_global(include_hidden: bool) -> LhResult<Vec<ThreadSummary>> {
     let mut threads = Vec::new();
     for provider in all() {
-        match provider.list_threads_global() {
+        let result = if include_hidden {
+            provider.list_threads_global_all()
+        } else {
+            provider.list_threads_global()
+        };
+        match result {
             Ok(mut provider_threads) => threads.append(&mut provider_threads),
             Err(error) => eprintln!(
                 "warning: failed to read {} history: {error}",

@@ -224,6 +224,12 @@ pub trait AgentProvider {
     fn executable(&self) -> Option<PathBuf>;
     fn list_threads(&self, cwd: &std::path::Path) -> LhResult<Vec<ThreadSummary>>;
     fn list_threads_global(&self) -> LhResult<Vec<ThreadSummary>>;
+    fn list_threads_all(&self, cwd: &std::path::Path) -> LhResult<Vec<ThreadSummary>> {
+        self.list_threads(cwd)
+    }
+    fn list_threads_global_all(&self) -> LhResult<Vec<ThreadSummary>> {
+        self.list_threads_global()
+    }
     fn new_command(&self, name: Option<&str>, cwd: &std::path::Path) -> LhResult<LaunchCommand>;
     fn resume_command(&self, thread: Option<&ThreadSummary>) -> LhResult<LaunchCommand>;
     fn list_memory(&self, _cwd: &Path) -> LhResult<Vec<MemoryFile>> {

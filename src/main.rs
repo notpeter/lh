@@ -42,6 +42,8 @@ enum Commands {
     List {
         #[arg(short = 'g', long = "global", help = "Scan all known agent history")]
         global: bool,
+        #[arg(long = "all", help = "Include hidden internal threads")]
+        all: bool,
         #[arg(
             short = 'C',
             long = "directory",
@@ -51,7 +53,6 @@ enum Commands {
         )]
         directory: Option<PathBuf>,
         #[arg(
-            short = 'a',
             long = "agent",
             value_name = "AGENT",
             value_parser = parse_agent_kind,
@@ -289,6 +290,7 @@ fn run() -> LhResult<()> {
 
     match cli.command.unwrap_or(Commands::List {
         global: false,
+        all: false,
         directory: None,
         agent: None,
         noalias: false,
@@ -300,6 +302,7 @@ fn run() -> LhResult<()> {
     }) {
         Commands::List {
             global,
+            all,
             directory,
             agent,
             noalias,
@@ -312,6 +315,7 @@ fn run() -> LhResult<()> {
             &cwd,
             ListRequest {
                 global,
+                all,
                 directory,
                 agent,
                 noalias,
@@ -458,6 +462,7 @@ fn is_broken_pipe_error(mut error: &(dyn std::error::Error + 'static)) -> bool {
 
 struct ListRequest {
     global: bool,
+    all: bool,
     directory: Option<PathBuf>,
     agent: Option<AgentKind>,
     noalias: bool,
@@ -478,16 +483,20 @@ fn list(cwd: &Path, request: ListRequest) -> LhResult<()> {
     let mut threads = if let Some(agent) = request.agent {
         let provider = providers::by_kind(agent);
         if request.global {
-            provider.list_threads_global()?
+            if request.all {
+                provider.list_threads_global_all()?
+            } else {
+                provider.list_threads_global()?
+            }
         } else {
             let dirs = list_dirs(&list_cwd, request.noalias, request.onlyalias)?;
-            providers::list_provider_for_dirs(&*provider, &dirs)?
+            providers::list_provider_for_dirs(&*provider, &dirs, request.all)?
         }
     } else if request.global {
-        providers::list_global()?
+        providers::list_global(request.all)?
     } else {
         let dirs = list_dirs(&list_cwd, request.noalias, request.onlyalias)?;
-        providers::list_all_for_dirs(&dirs)?
+        providers::list_all_for_dirs(&dirs, request.all)?
     };
     threads = filter_threads(threads, &filters);
     if let Some(limit) = request.limit {
@@ -693,12 +702,13 @@ fn move_leading_directory_flag(args: &mut Vec<OsString>) {
 fn is_list_shortcut_arg(arg: &OsString) -> bool {
     let value = arg.to_string_lossy();
     is_global_arg(arg)
+        || value == "--all"
         || value.starts_with("--agent=")
         || value.starts_with("--directory=")
         || (value.starts_with("-C") && value.len() > 2)
         || matches!(
             value.as_ref(),
-            "-a" | "--agent"
+            "--agent"
                 | "-C"
                 | "--directory"
                 | "--noalias"
@@ -1354,7 +1364,7 @@ fn select_provider_thread(
             provider.list_threads_global()?
         } else {
             let dirs = config::alias_group(cwd)?;
-            providers::list_provider_for_dirs(&*provider, &dirs)?
+            providers::list_provider_for_dirs(&*provider, &dirs, false)?
         };
         return match fuzzy::select_thread(&threads, query) {
             MatchResult::One(thread) => Ok((provider, Some(thread.clone()))),
@@ -1365,10 +1375,10 @@ fn select_provider_thread(
     }
 
     let threads = if global {
-        providers::list_global()?
+        providers::list_global(false)?
     } else {
         let dirs = config::alias_group(cwd)?;
-        providers::list_all_for_dirs(&dirs)?
+        providers::list_all_for_dirs(&dirs, false)?
     };
     match fuzzy::select_thread(&threads, query) {
         MatchResult::One(thread) => Ok((providers::by_kind(thread.agent), Some(thread.clone()))),
@@ -2113,6 +2123,27 @@ mod tests {
             normalize_args(strings(&["lh", "-g", "--agent", "zed"])),
             strings(&["lh", "list", "-g", "--agent", "zed"])
         );
+    }
+
+    #[test]
+    fn inserts_default_list_for_all_flag() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-g", "--all"])),
+            strings(&["lh", "list", "-g", "--all"])
+        );
+    }
+
+    #[test]
+    fn inserts_default_list_for_agent_flag() {
+        assert_eq!(
+            normalize_args(strings(&["lh", "-g", "--agent", "zed"])),
+            strings(&["lh", "list", "-g", "--agent", "zed"])
+        );
+    }
+
+    #[test]
+    fn rejects_removed_short_a_flag() {
+        assert!(Cli::try_parse_from(strings(&["lh", "list", "-a"])).is_err());
     }
 
     #[test]
